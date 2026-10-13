@@ -2,220 +2,359 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import charge from '../functions/card-charge';
 
+const API = 'https://api.razorpay.com/v1';
 const settings = { key_id: 'rzp_test_1', key_secret: 'secret' };
+const account = { name: 'Ada Lovelace', email: 'ada@example.com', phone: '+911234567890', billing: { phone: '+910000000001' }, shipping: { phone: '+910000000002' } };
 
-function request(data: Record<string, unknown>) {
-  return { appId: 'razorpay', data, swell: { settings: vi.fn(async () => settings) } } as any;
+function request(data: Record<string, unknown>, shopper: Record<string, unknown> | undefined = account) {
+  const get = vi.fn(async (url: string) => (url === '/accounts/acc_1' ? shopper : null));
+  return { appId: 'razorpay', data, swell: { settings: vi.fn(async () => settings), get } } as any;
 }
 
+type Call = { method: string; url: string; body?: any };
+
 /**
- * Fake Razorpay payments API around one payment: GET returns it, PATCH updates its notes,
- * capture marks it captured. `capture: 'race'` captures it but answers with an error,
- * as when another call captured it first; `capture: 'error'` fails and leaves it authorized.
+ * Fake Razorpay around a set of payments. GET and PATCH read and update them; capture marks one captured.
+ * `capture`: 'taken' — another Swell payment captured and claimed it first, the call answers with an error;
+ * 'lost' — Razorpay captured it but the answer was lost; 'error' — failed, still authorized;
+ * 'expired' — failed because the authorization was released.
+ * A saved card payment gets `recurringStatus`, by default what its order asked for.
  */
-function mockRazorpay(payment: Record<string, unknown>, { capture }: { capture?: 'race' | 'error' } = {}) {
-  let current = { ...payment };
-  const calls: { url: string; method: string; body?: any }[] = [];
+function fakeRazorpay(
+  payments: Record<string, unknown>[],
+  { capture, recurringStatus, patch }: { capture?: 'taken' | 'lost' | 'error' | 'expired'; recurringStatus?: string; patch?: 'error' } = {},
+) {
+  const store = new Map(payments.map((payment) => [payment.id as string, { ...payment }]));
+  let paymentCapture: boolean | undefined;
+  const calls: Call[] = [];
+  const fail = (status: number, description: string) => Response.json({ error: { description } }, { status });
   vi.stubGlobal('fetch', vi.fn(async (url: string, init: RequestInit) => {
     const method = init.method ?? 'GET';
     const body = init.body ? JSON.parse(String(init.body)) : undefined;
-    calls.push({ url, method, body });
-    if (method === 'PATCH') {
-      current = { ...current, notes: body.notes };
-    } else if (url.endsWith('/capture')) {
-      if (capture === 'error') return new Response('{"error":{"description":"Gateway timeout"}}', { status: 502 });
-      current = { ...current, status: 'captured' };
-      if (capture === 'race') return new Response('{"error":{"description":"This payment has already been captured"}}', { status: 400 });
+    calls.push({ method, url, body });
+    const path = url.slice(API.length);
+    if (path === '/customers') return Response.json({ id: 'cust_1' });
+    if (path === '/orders') {
+      paymentCapture = body.payment_capture;
+      return Response.json({ id: 'order_9', amount: body.amount, currency: body.currency });
     }
-    return Response.json(current);
+    if (path === '/payments/create/recurring') {
+      const status = recurringStatus ?? (paymentCapture ? 'captured' : 'authorized');
+      store.set('pay_saved', { id: 'pay_saved', status, amount: body.amount, currency: body.currency, method: 'card', order_id: body.order_id, notes: body.notes });
+      return Response.json({ razorpay_payment_id: 'pay_saved', razorpay_order_id: body.order_id });
+    }
+    const [, id, action] = path.match(/^\/payments\/([^/?]+)(?:\/(\w+))?/) ?? [];
+    const payment = store.get(id);
+    if (!payment) return fail(400, 'The id provided does not exist');
+    if (method === 'PATCH') {
+      if (patch === 'error') return fail(502, 'Bad gateway');
+      store.set(id, { ...payment, notes: body.notes });
+    } else if (action === 'capture') {
+      if (capture === 'error') return fail(502, 'Gateway timeout');
+      if (capture === 'expired') {
+        store.set(id, { ...payment, status: 'refunded' });
+        return fail(400, 'Payment authorization has expired');
+      }
+      if (capture === 'taken') {
+        store.set(id, { ...payment, status: 'captured', notes: { swell_payment_id: 'swell_pay_other' } });
+        return fail(400, 'This payment has already been captured');
+      }
+      store.set(id, { ...payment, status: 'captured' });
+      if (capture === 'lost') return fail(504, 'Gateway timeout');
+    }
+    return Response.json(store.get(id));
   }));
-  return calls;
+  return { calls, payment: (id: string) => store.get(id) };
 }
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
 
-const base = { id: 'swell_pay_1', amount: 10.5, currency: 'INR', intent: { razorpay: { id: 'pay_1' } } };
+const card = { token: 'token_1', last4: '1111', brand: 'Visa', exp_month: 12, exp_year: 2030 };
+const base = { id: 'swell_pay_1', account_id: 'acc_1', amount: 10.5, currency: 'INR', card, intent: { razorpay: { id: 'pay_1' } } };
 // Razorpay returns empty notes as an empty array
 const authorized = { id: 'pay_1', status: 'authorized', amount: 1050, currency: 'INR', method: 'card', notes: [] };
-const bound = { ...authorized, notes: { swell_payment_id: 'swell_pay_1' } };
-const capturedBound = { ...bound, status: 'captured' };
+const mine = { swell_payment_id: 'swell_pay_1' };
+const other = { swell_payment_id: 'swell_pay_other' };
 
+const success = (transactionId: string) => ({ success: true, transaction_id: transactionId });
 const failure = (message: string) => ({ success: false, error: { message } });
+const FAIL_CLOSED = 'Payment already captured but not recorded; contact support';
+const summary = (calls: Call[]) => calls.map(({ method, url }) => `${method} ${url.slice(API.length)}`);
+
+const SAVED_CARD_CALLS = ['POST /customers', 'POST /orders', 'POST /payments/create/recurring', 'GET /payments/pay_saved'];
+function expectSavedCardBodies(calls: Call[], capture: boolean) {
+  expect(calls.find((call) => call.url.endsWith('/customers'))?.body).toEqual({
+    name: 'Ada Lovelace', email: 'ada@example.com', contact: '+911234567890', fail_existing: '0',
+  });
+  expect(calls.find((call) => call.url.endsWith('/orders'))?.body).toEqual({
+    amount: 1050, currency: 'INR', payment_capture: capture, notes: mine,
+  });
+  expect(calls.find((call) => call.url.endsWith('/payments/create/recurring'))?.body).toEqual({
+    email: 'ada@example.com', contact: '+911234567890', amount: 1050, currency: 'INR',
+    order_id: 'order_9', customer_id: 'cust_1', token: 'token_1', recurring: '1', notes: mine,
+  });
+}
 
 describe('payment.charge', () => {
-  describe('authorize phase', () => {
-    it('binds the authorized payment to the Swell payment without capturing it', async () => {
-      const calls = mockRazorpay(authorized);
-      expect(await charge(request({ ...base, captured: false }))).toEqual({ success: true, transaction_id: 'pay_1' });
-      expect(calls.map(({ method, url, body }) => [method, url, body])).toEqual([
-        ['GET', 'https://api.razorpay.com/v1/payments/pay_1', undefined],
-        ['PATCH', 'https://api.razorpay.com/v1/payments/pay_1', { notes: { swell_payment_id: 'swell_pay_1' } }],
-      ]);
+  describe('authorize phase (captured: false)', () => {
+    it('accepts the shopper authorization without writing to it', async () => {
+      const { calls } = fakeRazorpay([authorized]);
+      expect(await charge(request({ ...base, captured: false }))).toEqual(success('pay_1'));
+      expect(summary(calls)).toEqual(['GET /payments/pay_1']);
     });
 
-    it('keeps the payment notes it already has when binding', async () => {
-      const calls = mockRazorpay({ ...authorized, notes: { cart: 'c1' } });
-      await charge(request({ ...base, captured: false }));
-      expect(calls[1].body).toEqual({ notes: { cart: 'c1', swell_payment_id: 'swell_pay_1' } });
-    });
-
-    it('accepts a payment already bound to this Swell payment without writing again', async () => {
-      const calls = mockRazorpay(bound);
-      expect(await charge(request({ ...base, captured: false }))).toEqual({ success: true, transaction_id: 'pay_1' });
-      expect(calls.map((call) => call.method)).toEqual(['GET']);
-    });
-
-    it('fails for an authorized payment bound to another Swell payment', async () => {
-      const calls = mockRazorpay({ ...authorized, notes: { swell_payment_id: 'swell_pay_other' } });
-      expect(await charge(request({ ...base, captured: false }))).toEqual(failure('Payment belongs to another order'));
-      expect(calls.map((call) => call.method)).toEqual(['GET']);
-    });
-
-    it('fails when the amount differs', async () => {
-      mockRazorpay({ ...authorized, amount: 999 });
-      expect(await charge(request({ ...base, captured: false }))).toEqual(
-        failure('Payment amount 999 INR does not match the order amount 1050 INR'),
-      );
-    });
-
-    it('fails when the currency differs', async () => {
-      mockRazorpay({ ...authorized, currency: 'USD' });
-      expect(await charge(request({ ...base, captured: false }))).toEqual(
-        failure('Payment amount 1050 USD does not match the order amount 1050 INR'),
-      );
+    it('accepts an authorization already bound to this Swell payment', async () => {
+      const { calls } = fakeRazorpay([{ ...authorized, notes: mine }]);
+      expect(await charge(request({ ...base, captured: false }))).toEqual(success('pay_1'));
+      expect(summary(calls)).toEqual(['GET /payments/pay_1']);
     });
 
     it('compares the Swell currency in upper case', async () => {
-      mockRazorpay(bound);
-      expect(await charge(request({ ...base, currency: 'inr', captured: false }))).toEqual({ success: true, transaction_id: 'pay_1' });
+      fakeRazorpay([authorized]);
+      expect(await charge(request({ ...base, currency: 'inr', captured: false }))).toEqual(success('pay_1'));
     });
 
-    it('fails for a payment that is not a card payment', async () => {
-      const calls = mockRazorpay({ ...authorized, method: 'upi' });
-      expect(await charge(request({ ...base, captured: false }))).toEqual(failure('Payment is not a card payment (method: upi)'));
-      expect(calls.map((call) => call.method)).toEqual(['GET']);
+    it.each([
+      ['bound to another Swell payment', { notes: other }],
+      ['released or expired', { status: 'refunded' }],
+      ['failed', { status: 'failed' }],
+      ['of another amount', { amount: 999 }],
+      ['in another currency', { currency: 'USD' }],
+      ['not a card payment', { method: 'upi' }],
+    ])('authorizes the saved card, without capturing, when the authorization is %s', async (_name, change) => {
+      const { calls, payment } = fakeRazorpay([{ ...authorized, ...change }]);
+      expect(await charge(request({ ...base, captured: false }))).toEqual(success('pay_saved'));
+      expect(summary(calls)).toEqual(['GET /payments/pay_1', ...SAVED_CARD_CALLS]);
+      expectSavedCardBodies(calls, false);
+      expect(payment('pay_1')).toEqual({ ...authorized, ...change });
     });
 
-    it('fails when the payment is not authorized', async () => {
-      mockRazorpay({ ...authorized, status: 'failed' });
-      expect(await charge(request({ ...base, captured: false }))).toEqual(failure('Payment is not authorized (status: failed)'));
+    it('fails when the saved card payment is not authorized', async () => {
+      fakeRazorpay([{ ...authorized, status: 'failed' }], { recurringStatus: 'failed' });
+      expect(await charge(request({ ...base, captured: false }))).toEqual(failure('Saved card payment pay_saved is not authorized (status: failed)'));
     });
 
-    it('fails for an already captured payment', async () => {
-      mockRazorpay(capturedBound);
-      expect(await charge(request({ ...base, captured: false }))).toEqual(failure('Payment is not authorized (status: captured)'));
+    it('fails with the reason when the authorization is unusable and there is no saved card', async () => {
+      const { calls } = fakeRazorpay([{ ...authorized, amount: 999 }]);
+      const { card: _card, ...data } = base;
+      expect(await charge(request({ ...data, captured: false }))).toEqual(failure('Payment amount 999 INR does not match the order amount 1050 INR'));
+      expect(summary(calls)).toEqual(['GET /payments/pay_1']);
+    });
+
+    it('fails closed for a captured authorization that no Swell payment recorded', async () => {
+      const { calls } = fakeRazorpay([{ ...authorized, status: 'captured' }]);
+      expect(await charge(request({ ...base, captured: false }))).toEqual(failure(FAIL_CLOSED));
+      expect(summary(calls)).toEqual(['GET /payments/pay_1']);
+    });
+
+    it('succeeds, without authorizing again, for a payment this Swell payment already captured', async () => {
+      const { calls } = fakeRazorpay([{ ...authorized, status: 'captured', notes: mine }]);
+      expect(await charge(request({ ...base, captured: false }))).toEqual(success('pay_1'));
+      expect(summary(calls)).toEqual(['GET /payments/pay_1']);
+    });
+
+    it('authorizes the saved card when there is no shopper authorization', async () => {
+      const { calls } = fakeRazorpay([]);
+      const { intent: _intent, ...data } = base;
+      expect(await charge(request({ ...data, captured: false }))).toEqual(success('pay_saved'));
+      expect(summary(calls)).toEqual(SAVED_CARD_CALLS);
+      expectSavedCardBodies(calls, false);
     });
   });
 
-  describe('capture phase', () => {
-    it('captures a payment bound to this Swell payment', async () => {
-      const calls = mockRazorpay(bound);
-      expect(await charge(request({ ...base, captured: true }))).toEqual({ success: true, transaction_id: 'pay_1' });
-      expect(calls.map(({ method, url, body }) => [method, url, body])).toEqual([
-        ['GET', 'https://api.razorpay.com/v1/payments/pay_1', undefined],
-        ['POST', 'https://api.razorpay.com/v1/payments/pay_1/capture', { amount: 1050, currency: 'INR' }],
+  describe('capture phase (captured: true or unset)', () => {
+    it('captures the authorization, then records this Swell payment on it', async () => {
+      const { calls, payment } = fakeRazorpay([{ ...authorized, notes: { cart: 'c1' } }]);
+      expect(await charge(request({ ...base, captured: true }))).toEqual(success('pay_1'));
+      expect(calls.map(({ method, url, body }) => [method, url.slice(API.length), body])).toEqual([
+        ['GET', '/payments/pay_1', undefined],
+        ['POST', '/payments/pay_1/capture', { amount: 1050, currency: 'INR' }],
+        ['PATCH', '/payments/pay_1', { notes: { cart: 'c1', swell_payment_id: 'swell_pay_1' } }],
       ]);
+      expect(payment('pay_1')).toMatchObject({ status: 'captured', notes: { swell_payment_id: 'swell_pay_1' } });
     });
 
-    it('binds an unbound authorized payment before capturing it', async () => {
-      const calls = mockRazorpay(authorized);
-      expect(await charge(request({ ...base, captured: true }))).toEqual({ success: true, transaction_id: 'pay_1' });
-      expect(calls.map(({ method, body }) => [method, body])).toEqual([
-        ['GET', undefined],
-        ['PATCH', { notes: { swell_payment_id: 'swell_pay_1' } }],
-        ['POST', { amount: 1050, currency: 'INR' }],
-      ]);
+    it('captures a merchant capture days later from the transaction id, without charging again', async () => {
+      const { calls } = fakeRazorpay([{ ...authorized, id: 'pay_2' }]);
+      expect(await charge(request({ ...base, captured: true, transaction_id: 'pay_2' }))).toEqual(success('pay_2'));
+      expect(summary(calls)).toEqual(['GET /payments/pay_2', 'POST /payments/pay_2/capture', 'PATCH /payments/pay_2']);
     });
 
     it('treats a missing captured flag as a capture request', async () => {
-      const calls = mockRazorpay(bound);
-      await charge(request(base));
-      expect(calls.at(-1)?.url).toBe('https://api.razorpay.com/v1/payments/pay_1/capture');
+      const { calls } = fakeRazorpay([authorized]);
+      expect(await charge(request(base))).toEqual(success('pay_1'));
+      expect(summary(calls)).toContain('POST /payments/pay_1/capture');
     });
 
-    it('does not capture an authorized payment bound to another Swell payment', async () => {
-      const calls = mockRazorpay({ ...authorized, notes: { swell_payment_id: 'swell_pay_other' } });
-      expect(await charge(request({ ...base, captured: true }))).toEqual(failure('Payment belongs to another order'));
-      expect(calls.map((call) => call.method)).toEqual(['GET']);
+    it('captures its own saved card authorization from the authorize phase without writing again', async () => {
+      const saved = { ...authorized, id: 'pay_saved', notes: mine };
+      const { calls } = fakeRazorpay([authorized, saved]);
+      expect(await charge(request({ ...base, captured: true, transaction_id: 'pay_saved' }))).toEqual(success('pay_saved'));
+      expect(summary(calls)).toEqual(['GET /payments/pay_saved', 'POST /payments/pay_saved/capture']);
     });
 
-    it('does not capture an authorized payment of another amount', async () => {
-      const calls = mockRazorpay({ ...bound, amount: 999 });
-      expect(await charge(request({ ...base, captured: true }))).toEqual(
-        failure('Payment amount 999 INR does not match the order amount 1050 INR'),
-      );
-      expect(calls.map((call) => call.method)).toEqual(['GET']);
+    it('succeeds on a retry after its own capture without another call', async () => {
+      const { calls } = fakeRazorpay([{ ...authorized, status: 'captured', notes: mine }]);
+      expect(await charge(request({ ...base, captured: true, transaction_id: 'pay_1' }))).toEqual(success('pay_1'));
+      expect(summary(calls)).toEqual(['GET /payments/pay_1']);
     });
 
-    it('succeeds without a second capture when this Swell payment already captured it', async () => {
-      const calls = mockRazorpay(capturedBound);
-      expect(await charge(request({ ...base, captured: true }))).toEqual({ success: true, transaction_id: 'pay_1' });
-      expect(calls.map((call) => call.method)).toEqual(['GET']);
+    it('fails closed, never charging again, for a captured payment that no Swell payment recorded', async () => {
+      const { calls } = fakeRazorpay([{ ...authorized, status: 'captured' }]);
+      expect(await charge(request({ ...base, captured: true }))).toEqual(failure(FAIL_CLOSED));
+      expect(summary(calls)).toEqual(['GET /payments/pay_1']);
     });
 
-    it('fails for a captured payment of another amount', async () => {
-      mockRazorpay({ ...capturedBound, amount: 500 });
-      expect(await charge(request({ ...base, captured: true }))).toEqual(
-        failure('Payment amount 500 INR does not match the order amount 1050 INR'),
-      );
+    it('charges the saved card when another Swell payment wins the capture race', async () => {
+      const { calls } = fakeRazorpay([authorized], { capture: 'taken' });
+      expect(await charge(request({ ...base, captured: true }))).toEqual(success('pay_saved'));
+      expect(summary(calls)).toEqual(['GET /payments/pay_1', 'POST /payments/pay_1/capture', 'GET /payments/pay_1', ...SAVED_CARD_CALLS]);
+      expectSavedCardBodies(calls, true);
     });
 
-    it('fails for a captured payment bound to another Swell payment', async () => {
-      mockRazorpay({ ...capturedBound, notes: { swell_payment_id: 'swell_pay_other' } });
-      expect(await charge(request({ ...base, captured: true }))).toEqual(failure('Payment belongs to another order'));
+    it('succeeds when a concurrent call of this Swell payment captured it first', async () => {
+      const { calls } = fakeRazorpay([{ ...authorized, notes: mine }], { capture: 'lost' });
+      expect(await charge(request({ ...base, captured: true }))).toEqual(success('pay_1'));
+      expect(summary(calls)).toEqual(['GET /payments/pay_1', 'POST /payments/pay_1/capture', 'GET /payments/pay_1']);
     });
 
-    it('fails for a captured payment without a binding', async () => {
-      const calls = mockRazorpay({ ...authorized, status: 'captured' });
-      expect(await charge(request({ ...base, captured: true }))).toEqual(failure('Payment belongs to another order'));
-      expect(calls.map((call) => call.method)).toEqual(['GET']);
+    it('fails closed when the capture answer is lost and the payment is captured but unrecorded', async () => {
+      const { calls } = fakeRazorpay([authorized], { capture: 'lost' });
+      expect(await charge(request({ ...base, captured: true }))).toEqual(failure(FAIL_CLOSED));
+      expect(summary(calls)).toEqual(['GET /payments/pay_1', 'POST /payments/pay_1/capture', 'GET /payments/pay_1']);
     });
 
-    it('fails for a captured payment that is not a card payment', async () => {
-      mockRazorpay({ ...capturedBound, method: 'netbanking' });
-      expect(await charge(request({ ...base, captured: true }))).toEqual(failure('Payment is not a card payment (method: netbanking)'));
+    it('charges the saved card when the authorization expired at capture time', async () => {
+      const { calls } = fakeRazorpay([authorized], { capture: 'expired' });
+      expect(await charge(request({ ...base, captured: true }))).toEqual(success('pay_saved'));
+      expect(summary(calls).slice(3)).toEqual(SAVED_CARD_CALLS);
     });
 
-    it('recovers when another call captured the payment first', async () => {
-      const calls = mockRazorpay(bound, { capture: 'race' });
-      expect(await charge(request({ ...base, captured: true }))).toEqual({ success: true, transaction_id: 'pay_1' });
-      expect(calls.map((call) => call.method)).toEqual(['GET', 'POST', 'GET']);
+    it('fails with the capture error when the capture fails and there is no saved card', async () => {
+      const { calls } = fakeRazorpay([authorized], { capture: 'error' });
+      const { card: _card, ...data } = base;
+      expect(await charge(request({ ...data, captured: true }))).toEqual(failure('Razorpay: Gateway timeout'));
+      expect(summary(calls)).toEqual(['GET /payments/pay_1', 'POST /payments/pay_1/capture', 'GET /payments/pay_1']);
     });
 
-    it('fails with the capture error when the payment is still not captured', async () => {
-      mockRazorpay(bound, { capture: 'error' });
-      expect(await charge(request({ ...base, captured: true }))).toEqual(failure('Razorpay: Gateway timeout'));
+    it('still succeeds when recording the owner fails after a successful capture', async () => {
+      const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      fakeRazorpay([authorized], { patch: 'error' });
+      expect(await charge(request({ ...base, captured: true }))).toEqual(success('pay_1'));
+      expect(log).toHaveBeenCalledOnce();
     });
 
-    it('fails for a payment that is neither authorized nor captured', async () => {
-      mockRazorpay({ ...bound, status: 'refunded' });
-      expect(await charge(request({ ...base, captured: true }))).toEqual(failure('Payment is not capturable (status: refunded)'));
+    it.each([
+      ['bound to another Swell payment', { notes: other }],
+      ['captured for another Swell payment', { status: 'captured', notes: other }],
+      ['released or expired', { status: 'refunded' }],
+      ['of another amount', { amount: 999 }],
+      ['in another currency', { currency: 'USD' }],
+      ['not a card payment', { method: 'netbanking' }],
+    ])('charges the saved card, leaving the authorization alone, when it is %s', async (_name, change) => {
+      const { calls, payment } = fakeRazorpay([{ ...authorized, ...change }]);
+      expect(await charge(request({ ...base, captured: true }))).toEqual(success('pay_saved'));
+      expect(summary(calls)).toEqual(['GET /payments/pay_1', ...SAVED_CARD_CALLS]);
+      expectSavedCardBodies(calls, true);
+      expect(payment('pay_1')).toEqual({ ...authorized, ...change });
+    });
+
+    it.each([
+      ['bound to another Swell payment', { notes: other }, 'Payment belongs to another order'],
+      ['not authorized', { status: 'failed' }, 'Payment is not authorized (status: failed)'],
+      ['in another currency', { currency: 'USD' }, 'Payment amount 1050 USD does not match the order amount 1050 INR'],
+      ['not a card payment', { method: 'upi' }, 'Payment is not a card payment (method: upi)'],
+    ])('fails with the reason when the authorization is %s and there is no saved card', async (_name, change, message) => {
+      const { calls } = fakeRazorpay([{ ...authorized, ...change }]);
+      const { card: _card, ...data } = base;
+      expect(await charge(request({ ...data, captured: true }))).toEqual(failure(message));
+      expect(summary(calls)).toEqual(['GET /payments/pay_1']);
+    });
+
+    it('fails when the saved card payment is not captured', async () => {
+      fakeRazorpay([{ ...authorized, status: 'refunded' }], { recurringStatus: 'authorized' });
+      expect(await charge(request({ ...base, captured: true }))).toEqual(failure('Saved card payment pay_saved is not captured (status: authorized)'));
     });
   });
 
-  it('uses the transaction id when the intent is gone', async () => {
-    const calls = mockRazorpay({ ...capturedBound, id: 'pay_2' });
-    const { intent, ...data } = base;
-    await charge(request({ ...data, captured: true, transaction_id: 'pay_2' }));
-    expect(calls[0].url).toBe('https://api.razorpay.com/v1/payments/pay_2');
+  describe('without a shopper authorization (subscription renewal, admin charge)', () => {
+    const { intent: _intent, ...renewal } = base;
+
+    it('charges the saved card, captured and bound at creation', async () => {
+      const { calls, payment } = fakeRazorpay([]);
+      expect(await charge(request(renewal))).toEqual(success('pay_saved'));
+      expect(summary(calls)).toEqual(SAVED_CARD_CALLS);
+      expectSavedCardBodies(calls, true);
+      expect(payment('pay_saved')).toMatchObject({ status: 'captured', notes: mine });
+    });
+
+    it.each([
+      ['the account billing phone', { ...account, phone: undefined }, {}, '+910000000001'],
+      ['the payment billing phone', { ...account, phone: undefined, billing: {} }, { billing: { phone: '+910000000003' } }, '+910000000003'],
+      ['the shipping phone', { ...account, phone: undefined, billing: undefined }, {}, '+910000000002'],
+    ])('falls back to %s as the contact', async (_name, shopper, data, contact) => {
+      const { calls } = fakeRazorpay([]);
+      expect(await charge(request({ ...renewal, ...data }, shopper))).toEqual(success('pay_saved'));
+      expect(calls.find((call) => call.url.endsWith('/customers'))?.body.contact).toBe(contact);
+      expect(calls.find((call) => call.url.endsWith('/payments/create/recurring'))?.body.contact).toBe(contact);
+    });
+
+    it('fails without a phone number, before calling Razorpay', async () => {
+      const { calls } = fakeRazorpay([]);
+      const shopper = { name: 'Ada', email: 'ada@example.com', billing: {}, shipping: {} };
+      expect(await charge(request(renewal, shopper))).toEqual(failure('A phone number is required to charge the saved card'));
+      expect(calls).toEqual([]);
+    });
+
+    it('fails without an email address, before calling Razorpay', async () => {
+      const { calls } = fakeRazorpay([]);
+      expect(await charge(request(renewal, { ...account, email: ' ' }))).toEqual(failure('An email address is required to charge the saved card'));
+      expect(calls).toEqual([]);
+    });
+
+    it('fails without an account', async () => {
+      const { calls } = fakeRazorpay([]);
+      const { account_id: _account, ...data } = renewal;
+      expect(await charge(request(data))).toEqual(failure('No account for this charge'));
+      expect(calls).toEqual([]);
+    });
+
+    it('fails without a saved card', async () => {
+      const { calls } = fakeRazorpay([]);
+      const { card: _card, ...data } = renewal;
+      expect(await charge(request(data))).toEqual(failure('No Razorpay payment or saved card for this charge'));
+      expect(calls).toEqual([]);
+    });
   });
 
-  it('fails without a Razorpay payment', async () => {
-    expect(await charge(request({ id: 'swell_pay_1', amount: 1, currency: 'INR', captured: false }))).toEqual(
-      failure('No Razorpay payment for this charge'),
-    );
+  it('prefers the transaction id of the authorize phase to the intent', async () => {
+    const { calls } = fakeRazorpay([authorized, { ...authorized, id: 'pay_saved', notes: mine }]);
+    await charge(request({ ...base, captured: true, transaction_id: 'pay_saved' }));
+    expect(calls[0].url).toBe(`${API}/payments/pay_saved`);
+  });
+
+  it('fails, without charging the saved card, when the payment cannot be read', async () => {
+    const { calls } = fakeRazorpay([]);
+    expect(await charge(request({ ...base, captured: true }))).toEqual(failure('Razorpay: The id provided does not exist'));
+    expect(summary(calls)).toEqual(['GET /payments/pay_1']);
   });
 
   it('fails without the Swell payment id, before calling Razorpay', async () => {
-    const fetch = vi.fn();
-    vi.stubGlobal('fetch', fetch);
-    const { id, ...data } = base;
+    const { calls } = fakeRazorpay([authorized]);
+    const { id: _id, ...data } = base;
     expect(await charge(request({ ...data, captured: false }))).toEqual(failure('No Swell payment for this charge'));
-    expect(fetch).not.toHaveBeenCalled();
+    expect(calls).toEqual([]);
   });
 
-  it('turns Razorpay API errors into the failure contract', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => new Response('{"error":{"description":"Bad request"}}', { status: 400 })));
-    expect(await charge(request({ ...base, captured: true }))).toEqual(failure('Razorpay: Bad request'));
+  it.each([
+    ['amount', { amount: undefined }, 'Invalid amount'],
+    ['currency', { currency: '' }, 'Invalid currency'],
+  ])('fails for an invalid %s, before calling Razorpay', async (_name, change, message) => {
+    const { calls } = fakeRazorpay([authorized]);
+    expect(await charge(request({ ...base, ...change }))).toEqual(failure(message));
+    expect(calls).toEqual([]);
   });
 });
