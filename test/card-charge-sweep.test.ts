@@ -7,10 +7,27 @@ const NOW = Date.parse('2026-10-13T12:00:00.000Z');
 const MINUTE = 60 * 1000;
 const ago = (minutes: number) => new Date(NOW - minutes * MINUTE).toISOString();
 
-/** A sweep request whose Swell lists `pending` as the payments left pending */
-function request(pending: Record<string, unknown>[]) {
-  const get = vi.fn(async (url: string) => (url === '/payments' ? { count: pending.length, results: pending } : null));
-  return { appId: 'razorpay', data: {}, swell: { settings: vi.fn(async () => settings), get, put: vi.fn(async () => ({})) } } as any;
+const APP_ID = '64f000000000000000000001';
+const GATEWAY = `app_${APP_ID}_card`;
+const paymentSettings = { methods: [{ id: 'paypal' }, { id: 'card', gateway: GATEWAY, extension_app_id: APP_ID, extension_config_id: 'card' }] };
+
+/**
+ * A sweep request whose Swell lists `pending` as the payments left pending; each one reads back as
+ * stored, and a write updates it
+ */
+function request(pending: Record<string, unknown>[], payments: Record<string, unknown> | null = paymentSettings) {
+  const records = new Map(pending.map((payment) => [`/payments/${payment.id}`, { ...payment }]));
+  const get = vi.fn(async (url: string) => {
+    if (url === '/settings/payments') return payments;
+    if (url === '/payments') return { count: pending.length, results: pending };
+    const record = records.get(url);
+    return record ? { ...record } : null;
+  });
+  const put = vi.fn(async (url: string, body: Record<string, unknown>) => {
+    const record = records.get(url);
+    return record && { ...Object.assign(record, body) };
+  });
+  return { appId: 'razorpay', data: {}, swell: { settings: vi.fn(async () => settings), get, put } } as any;
 }
 
 const writesOf = (req: any): [string, unknown][] => req.swell.put.mock.calls;
@@ -40,7 +57,7 @@ const finished = (transactionId: string, captured = true) => [
 const failed = (message: string) => [['/payments/swell_pay_1', { success: false, error: { message } }]];
 
 describe('saved card charge sweep', () => {
-  it('lists the oldest pending card payments of the last 8 days, but not the last 2 minutes', async () => {
+  it('lists the newest 10 pending card payments of this app\'s gateway, of the last 8 days but not the last 2 minutes', async () => {
     fakeRazorpay([]);
     const req = request([]);
     await sweep(req);
@@ -49,12 +66,58 @@ describe('saved card charge sweep', () => {
         async: true,
         success: null,
         method: 'card',
+        gateway: GATEWAY,
         void: { $ne: true },
         date_created: { $lt: ago(2), $gt: ago(8 * 24 * 60) },
       },
-      sort: 'date_created asc',
-      limit: 50,
+      sort: 'date_created desc',
+      limit: 10,
     });
+  });
+
+  it.each([
+    ['no payment settings', null],
+    ['no card method', { methods: [{ id: 'paypal' }] }],
+    ['a card method without an app', { methods: [{ id: 'card', gateway: 'stripe' }] }],
+  ])('skips the run, and logs it, with %s', async (_name, payments) => {
+    const log = quietLog();
+    const { calls } = fakeRazorpay([]);
+    const req = request([pending], payments);
+    await sweep(req);
+    expect(req.swell.get).not.toHaveBeenCalledWith('/payments', expect.anything());
+    expect(calls).toEqual([]);
+    expect(log).toHaveBeenCalledOnce();
+  });
+
+  it('sweeps at most 5 payments at a time', async () => {
+    const { calls } = fakeRazorpay([]);
+    const fetch = globalThis.fetch;
+    let running = 0;
+    let most = 0;
+    vi.stubGlobal('fetch', async (...args: Parameters<typeof fetch>) => {
+      most = Math.max(most, ++running);
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      running--;
+      return fetch(...args);
+    });
+    const many = Array.from({ length: 10 }, (_, index) => ({ ...pending, id: `swell_pay_${index}` }));
+    await sweep(request(many));
+    expect(most).toBe(5);
+    expect(calls).toHaveLength(10);
+  });
+
+  it('starts no payment once its 6 seconds are spent', async () => {
+    const { calls } = fakeRazorpay([]);
+    const fetch = globalThis.fetch;
+    // The first 5 payments start together, and the first to end does so 7 seconds in
+    vi.stubGlobal('fetch', async (...args: Parameters<typeof fetch>) => {
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      vi.setSystemTime(Date.now() + 7000);
+      return fetch(...args);
+    });
+    const many = Array.from({ length: 10 }, (_, index) => ({ ...pending, id: `swell_pay_${index}` }));
+    await sweep(request(many));
+    expect(summary(calls)).toEqual(many.slice(0, 5).map(({ id }) => `GET /orders?receipt=${id}&count=100`));
   });
 
   it('does nothing without pending payments, not even reading the settings', async () => {

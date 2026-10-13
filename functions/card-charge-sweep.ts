@@ -1,13 +1,5 @@
 import type Razorpay from './lib/razorpay';
-import {
-  chargeOf,
-  findSavedPayment,
-  messageOf,
-  mismatchOf,
-  notFinalized,
-  recordOutcome,
-  settleSavedPayment,
-} from './lib/saved-charge';
+import { chargeOf, findSavedPayment, finishSavedPayment, messageOf, mismatchOf, notFinalized, recordOutcome } from './lib/saved-charge';
 import { getRazorpay } from './lib/settings';
 
 export const config: SwellConfig = {
@@ -22,6 +14,10 @@ const SETTLED_AFTER = 2 * MINUTE;
 const ABANDONED_AFTER = 30 * MINUTE;
 /** Live recurring debits wait about 36 hours for the pre-debit notification; older charges are left alone */
 const WINDOW = 8 * 24 * 60 * MINUTE;
+/** Each payment takes 1 to 3 Razorpay calls of about 2 seconds, and the cron gets 10 seconds */
+const BATCH = 10;
+const CONCURRENCY = 5;
+const BUDGET = 6000;
 
 /** A Swell payment the charge left pending (`async`) */
 type PendingPayment = {
@@ -31,6 +27,20 @@ type PendingPayment = {
   captured?: boolean;
   date_created?: string;
 };
+
+type PaymentMethod = { id?: string; extension_app_id?: string; extension_config_id?: string };
+
+/**
+ * The gateway the platform stamps on this app's card payments, `app_<app id>_<config id>`, from the card
+ * method's settings. Undefined when the card method is not an app's.
+ */
+async function gatewayOf(req: SwellRequest): Promise<string | undefined> {
+  const settings = await req.swell.get('/settings/payments');
+  const methods: PaymentMethod[] = Array.isArray(settings?.methods) ? settings.methods : [];
+  const card = methods.find((method) => method?.id === 'card');
+  if (!card?.extension_app_id) return undefined;
+  return `app_${card.extension_app_id}_${card.extension_config_id || 'card'}`;
+}
 
 /**
  * Finishes one pending Swell payment by the rules of the charge, from the saved card payment found by its
@@ -50,36 +60,49 @@ async function sweepPayment(req: SwellRequest, razorpay: Razorpay, pending: Pend
   }
   // A captured one that does not match the order took the money: it fails rather than charge again
   const mismatch = payment.status === 'captured' && mismatchOf(payment, charge);
-  // The list's status is as fresh as a read
-  const outcome = mismatch ? { reason: mismatch } : await settleSavedPayment(payment.id, charge, payment.status);
-  // Still `created`: Razorpay waits for the pre-debit notification, and a later sweep finishes it
-  if (outcome === 'pending') return;
-  const recorded = 'reason' in outcome ? { reason: notFinalized(payment.id, outcome.reason) } : outcome;
-  await recordOutcome(req, charge, recorded, payment.id);
+  if (mismatch) {
+    await recordOutcome(req, charge, { reason: notFinalized(payment.id, mismatch) }, payment.id);
+    return;
+  }
+  // The list's status is as fresh as a read; a `created` one waits for the pre-debit notification
+  await finishSavedPayment(req, charge, payment.id, payment.status);
 }
 
 export default async function (req: SwellRequest) {
   const now = Date.now();
+  const gateway = await gatewayOf(req);
+  if (!gateway) {
+    console.error('Saved card charge sweep skipped: the card payment method is not an app\'s');
+    return;
+  }
   const { results = [] }: { results?: PendingPayment[] } =
     (await req.swell.get('/payments', {
       where: {
         async: true,
         success: null,
         method: 'card',
+        gateway,
         void: { $ne: true },
         date_created: { $lt: new Date(now - SETTLED_AFTER).toISOString(), $gt: new Date(now - WINDOW).toISOString() },
       },
-      sort: 'date_created asc',
-      limit: 50,
+      // Newest first: a live debit waiting for days does not hold back the charges that just lost an answer
+      sort: 'date_created desc',
+      limit: BATCH,
     })) ?? {};
   if (results.length === 0) return;
 
   const razorpay = await getRazorpay(req);
-  // In parallel, and one payment's error does not stop the others
-  const swept = await Promise.allSettled(results.map((pending) => sweepPayment(req, razorpay, pending, now)));
-  swept.forEach((result, index) => {
-    if (result.status === 'rejected') {
-      console.error(`Could not sweep the saved card charge: ${messageOf(result.reason)}`, `(Swell payment ${results[index].id})`);
+  // A few at a time, none started once the budget is spent (a later run takes them), and one payment's
+  // error does not stop the others
+  const queue = [...results];
+  const worker = async () => {
+    for (let pending = queue.shift(); pending && Date.now() - now < BUDGET; pending = queue.shift()) {
+      try {
+        await sweepPayment(req, razorpay, pending, now);
+      } catch (error) {
+        console.error(`Could not sweep the saved card charge: ${messageOf(error)}`, `(Swell payment ${pending.id})`);
+      }
     }
-  });
+  };
+  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, queue.length) }, worker));
 }
