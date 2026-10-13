@@ -15,14 +15,18 @@ export default async function (req: SwellRequest) {
       throw new Error('Invalid payment signature');
     }
 
-    const payment = await razorpay.getPayment(paymentId, true);
+    const payment = await razorpay.getPayment(paymentId, 'token');
+    const card = payment.token?.card;
     return {
       result: {
         id: payment.id,
         status: payment.status,
         amount: payment.amount,
         currency: payment.currency,
-        card: { last4: payment.card?.last4, network: payment.card?.network, type: payment.card?.type },
+        token: payment.token && {
+          id: payment.token.id,
+          card: { last4: card?.last4, network: card?.network, expiry_month: card?.expiry_month, expiry_year: card?.expiry_year },
+        },
       },
     };
   } catch (error) {

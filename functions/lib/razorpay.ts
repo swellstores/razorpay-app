@@ -10,6 +10,8 @@ export interface RazorpayPayment {
   /** Razorpay returns empty notes as an empty array */
   notes?: Record<string, string> | [];
   card?: { last4?: string; network?: string; type?: string };
+  /** Present with `expand[]=token` once the card was saved */
+  token?: { id: string; card?: { last4?: string; network?: string; expiry_month?: string; expiry_year?: string } };
 }
 
 const SIGNATURE = /^[0-9a-f]{64}$/i;
@@ -47,8 +49,17 @@ export default class Razorpay {
     return this.#request<{ id: string; amount: number; currency: string }>('/orders', 'POST', data);
   }
 
-  getPayment(id: string, expandCard = false) {
-    return this.#request<RazorpayPayment>(`/payments/${encodeURIComponent(id)}${expandCard ? '?expand[]=card' : ''}`);
+  createCustomer(data: Record<string, unknown>) {
+    return this.#request<{ id: string }>('/customers', 'POST', data);
+  }
+
+  getPayment(id: string, expand?: 'card' | 'token') {
+    return this.#request<RazorpayPayment>(`/payments/${encodeURIComponent(id)}${expand ? `?expand[]=${expand}` : ''}`);
+  }
+
+  /** Charges a saved card token without the shopper present */
+  createRecurringPayment(data: Record<string, unknown>) {
+    return this.#request<{ razorpay_payment_id: string }>('/payments/create/recurring', 'POST', data);
   }
 
   updatePayment(id: string, data: { notes: Record<string, string> }) {
