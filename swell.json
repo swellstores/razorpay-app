@@ -1,0 +1,15 @@
+{
+  "description": "",
+  "id": "razorpay",
+  "name": "Razorpay",
+  "type": "integration",
+  "version": "1.0.0",
+  "permissions": [],
+  "extensions": [
+    {
+      "id": "card",
+      "type": "payment",
+      "method": "card"
+    }
+  ]
+}
