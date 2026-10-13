@@ -115,24 +115,82 @@ export async function settleSavedPayment(
   return { transactionId: paymentId };
 }
 
+/** Logs naming the Swell payment and, when there is one, the Razorpay payment */
+function logError(message: string, charge: Charge, paymentId?: string) {
+  console.error(message, `(Swell payment ${charge.swellPaymentId}${paymentId ? `, Razorpay payment ${paymentId}` : ''})`);
+}
+
+/** Writes the Swell payment; a write that fails or answers without the payment is logged, and the sweep heals it */
+async function writePayment(req: SwellRequest, charge: Charge, data: Record<string, unknown>, paymentId?: string): Promise<boolean> {
+  try {
+    const result = await req.swell.put(`/payments/${charge.swellPaymentId}`, data);
+    if (result?.errors) throw new Error(JSON.stringify(result.errors));
+    if (!result?.id) throw new Error('Swell answered without the payment');
+    return true;
+  } catch (error) {
+    logError(`Could not record the saved card charge (${JSON.stringify(data)}): ${messageOf(error)}`, charge, paymentId);
+    return false;
+  }
+}
+
 /**
  * Finishes a Swell payment the charge left pending (`async`). `captured: true` only goes with a capture:
- * on a payment whose record is `captured: false` it would fire the charge again.
+ * on a payment whose record is `captured: false` it would fire the charge again. Returns whether it was
+ * written.
  */
-export async function recordOutcome(req: SwellRequest, charge: Charge, outcome: Outcome, paymentId?: string): Promise<void> {
-  const { swellPaymentId } = charge;
-  const ids = `(Swell payment ${swellPaymentId}${paymentId ? `, Razorpay payment ${paymentId}` : ''})`;
-  const data =
-    'transactionId' in outcome
-      ? { transaction_id: outcome.transactionId, success: true, ...(charge.capture && { captured: true }) }
-      : { success: false, error: { message: outcome.reason } };
+export async function recordOutcome(req: SwellRequest, charge: Charge, outcome: Outcome, paymentId?: string): Promise<boolean> {
   if ('reason' in outcome) {
-    console.error(`Saved card charge failed: ${outcome.reason}`, ids);
+    logError(`Saved card charge failed: ${outcome.reason}`, charge, paymentId);
+    return writePayment(req, charge, { success: false, error: { message: outcome.reason } }, paymentId);
   }
-  try {
-    const result = await req.swell.put(`/payments/${swellPaymentId}`, data);
-    if (result?.errors) throw new Error(JSON.stringify(result.errors));
-  } catch (error) {
-    console.error(`Could not record the saved card charge (${JSON.stringify(data)}): ${messageOf(error)}`, ids);
+  const data = { transaction_id: outcome.transactionId, success: true, ...(charge.capture && { captured: true }) };
+  return writePayment(req, charge, data, paymentId);
+}
+
+/**
+ * Whether the Swell payment, as stored now, asks for the capture. The hook's snapshot may be stale: the
+ * capture of an authorize-phase payment can come while its charge is in flight, and the hook then leaves
+ * it to the finish.
+ */
+async function wantsCapture(req: SwellRequest, charge: Charge): Promise<boolean> {
+  const record = await req.swell.get(`/payments/${charge.swellPaymentId}`);
+  if (!record?.id) {
+    throw new Error('The Swell payment could not be read');
+  }
+  return record.captured !== false;
+}
+
+/**
+ * Finishes the Swell payment with a saved card payment created for it, by the Swell payment's phase as
+ * stored now. `status` is the one already known; otherwise the payment is read. A payment still `created`
+ * (live pre-debit) is left for the sweep. After an authorize-only write the Swell payment is read again:
+ * a capture that came meanwhile found the charge in flight, so it is captured here, and `captured: true`
+ * is safe to write because the record is no longer `captured: false`. Throws when the outcome is unknown.
+ */
+export async function finishSavedPayment(
+  req: SwellRequest,
+  charge: Charge,
+  paymentId: string,
+  status?: RazorpayPayment['status'],
+): Promise<void> {
+  status ??= (await charge.razorpay.getPayment(paymentId)).status;
+  if (status === 'created') return;
+  if (status !== 'authorized' && status !== 'captured') {
+    await recordOutcome(req, charge, { reason: notFinalized(paymentId, `Payment is not authorized (status: ${status})`) }, paymentId);
+    return;
+  }
+  const phase = { ...charge, capture: await wantsCapture(req, charge) };
+  const outcome = await settleSavedPayment(paymentId, phase, status);
+  if (outcome === 'pending') return;
+  const recorded = 'reason' in outcome ? { reason: notFinalized(paymentId, outcome.reason) } : outcome;
+  const written = await recordOutcome(req, phase, recorded, paymentId);
+  if (!written || phase.capture || 'reason' in outcome || !(await wantsCapture(req, charge))) return;
+
+  const captured = await settleSavedPayment(paymentId, { ...charge, capture: true }, status);
+  if (captured !== 'pending' && 'transactionId' in captured) {
+    await writePayment(req, charge, { captured: true }, paymentId);
+  } else if (captured !== 'pending') {
+    // Its success is already recorded and can not change: support has to capture or void it
+    logError(`Saved card payment ${paymentId} was authorized but not captured: ${captured.reason}`, charge, paymentId);
   }
 }

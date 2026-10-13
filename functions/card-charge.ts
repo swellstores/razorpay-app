@@ -4,6 +4,7 @@ import {
   type Charge,
   chargeOf,
   findSavedPayment,
+  finishSavedPayment,
   isRefusal,
   messageOf,
   mismatchOf,
@@ -24,6 +25,7 @@ export const config: SwellConfig = {
 };
 
 const FAIL_CLOSED = 'Payment already captured but not recorded; contact support';
+const NO_LONGER_VALID = 'The authorization is no longer valid; charge the saved card with a new payment';
 
 function notesOf(payment: RazorpayPayment): Record<string, string> {
   return Array.isArray(payment.notes) ? {} : (payment.notes ?? {});
@@ -126,11 +128,11 @@ type Customer = { id: string; email: string; contact: string };
 
 /**
  * Charges the saved card token with a new payment on `orderId`, bound to this Swell payment at creation,
- * and records the outcome on the Swell payment. It runs after the hook answered: create/recurring alone
- * takes more than the hook's 10 seconds. Razorpay answers a successful payment with the order's
- * signature, so it is not read back; without a valid signature it is read. When the outcome is unknown
- * (an answer lost, a 5xx) or Razorpay still waits to debit it, it writes nothing: the sweep finds the
- * payment by its order receipt and finishes the Swell payment.
+ * and finishes the Swell payment by its phase as stored then. It runs after the hook answered:
+ * create/recurring alone takes more than the hook's 10 seconds. Razorpay answers a successful payment
+ * with the order's signature, so it is not read back; without a valid signature it is read. When the
+ * outcome is unknown (an answer lost, a 5xx) or Razorpay still waits to debit it, it writes nothing: the
+ * sweep finds the payment by its order receipt and finishes the Swell payment.
  */
 async function finishSavedCharge(req: SwellRequest, customer: Customer, token: string, orderId: string, charge: Charge) {
   const { razorpay, swellPaymentId, amount, currency } = charge;
@@ -159,10 +161,7 @@ async function finishSavedCharge(req: SwellRequest, customer: Customer, token: s
   }
   try {
     const signed = await razorpay.verifySignature(orderId, paymentId, signature);
-    const outcome = await settleSavedPayment(paymentId, charge, signed ? 'authorized' : undefined);
-    if (outcome === 'pending') return;
-    const recorded = 'reason' in outcome ? { reason: notFinalized(paymentId, outcome.reason) } : outcome;
-    await recordOutcome(req, charge, recorded, paymentId);
+    await finishSavedPayment(req, charge, paymentId, signed ? 'authorized' : undefined);
   } catch (error) {
     console.error(`Saved card payment ${paymentId} has an unknown outcome: ${messageOf(error)}`, `(Swell payment ${swellPaymentId})`);
   }
@@ -210,10 +209,17 @@ export default async function (req: SwellRequest) {
   // The authorize phase's result first: the intent is the shopper's original authorization
   const paymentId = req.data.transaction_id || req.data.intent?.razorpay?.id;
   const token = req.data.card?.token;
+  // The Swell payment as stored before this charge; absent when it is being created
+  const record = req.data.$record;
 
   try {
     // `id` is the Swell payment record being charged, in both phases
     const charge = chargeOf(await getRazorpay(req), req.data);
+    // A saved card charge of this Swell payment is in flight (the capture came right after an authorize
+    // phase that answered async): it reads the capture from the record when it finishes
+    if (record?.async === true && record.success == null) {
+      return { async: true };
+    }
     let reason = 'No Razorpay payment or saved card for this charge';
     if (paymentId) {
       const outcome = await chargeShopperPayment(paymentId, charge);
@@ -222,6 +228,11 @@ export default async function (req: SwellRequest) {
     }
     if (!token) {
       throw new Error(reason);
+    }
+    // A pending charge would leave a Swell payment that already has its result (a capture days after the
+    // authorization) recorded as paid without the money: the merchant charges the card with a new payment
+    if (record && record.success != null) {
+      throw new Error(NO_LONGER_VALID);
     }
     return await chargeSavedCard(req, token, charge);
   } catch (error) {

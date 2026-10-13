@@ -8,17 +8,31 @@ const account = { name: 'Ada Lovelace', email: 'ada@example.com', phone: '+91123
 // Every test's background work, settled before the fake Razorpay goes away
 const backgrounds: Promise<unknown>[] = [];
 
-/** A charge request; `waitUntil` collects the background work, which `writesOf` awaits */
+/**
+ * A charge request; `waitUntil` collects the background work, which `writesOf` awaits. `record` is the
+ * Swell payment as stored, which the background reads and writes: a test may change it on the way.
+ */
 function request(data: Record<string, unknown>, shopper: Record<string, unknown> | undefined = account) {
-  const get = vi.fn(async (url: string) => (url === '/accounts/acc_1' ? shopper : null));
+  const record: Record<string, unknown> = { id: data.id, captured: data.captured, async: true };
+  const get = vi.fn(async (url: string) => {
+    if (url === '/accounts/acc_1') return shopper;
+    if (url === `/payments/${data.id}`) return { ...record };
+    return null;
+  });
+  const put = vi.fn(async (url: string, body: Record<string, unknown>) => {
+    if (url !== `/payments/${data.id}`) return {};
+    Object.assign(record, body);
+    return { ...record };
+  });
   const background: Promise<unknown>[] = [];
   return {
     appId: 'razorpay',
     data,
+    record,
     background,
     context: { waitUntil: (promise: Promise<unknown>) => background.push(promise) && backgrounds.push(promise) },
     appValues: (values: object) => ({ $app: { razorpay: values } }),
-    swell: { settings: vi.fn(async () => settings), get, put: vi.fn(async () => ({})) },
+    swell: { settings: vi.fn(async () => settings), get, put },
   } as any;
 }
 
@@ -238,12 +252,31 @@ describe('payment.charge', () => {
       expect(summary(calls)).toEqual(['GET /payments/pay_1', 'POST /payments/pay_1/capture', 'GET /payments/pay_1']);
     });
 
-    it('charges the saved card when the authorization expired at capture time', async () => {
+    it('charges the saved card when the authorization expired at capture time in a single call', async () => {
       const { calls } = fakeRazorpay([authorized], { captures: { pay_1: 'expired' } });
       const req = request({ ...base, captured: true });
       expect(await charge(req)).toEqual(ASYNC);
       expect(await writesOf(req)).toEqual(finished('pay_saved'));
       expect(summary(calls).slice(3)).toEqual(SAVED_CARD_CAPTURE);
+    });
+
+    it.each([
+      ['succeeded', true],
+      ['failed', false],
+    ])('fails, without charging the saved card, when the authorization expired and the Swell payment already %s', async (_name, succeeded) => {
+      const { calls } = fakeRazorpay([authorized], { captures: { pay_1: 'expired' } });
+      // The merchant captures days later: the authorize phase recorded the shopper's authorization
+      const req = request({ ...base, captured: true, transaction_id: 'pay_1', $record: { captured: false, success: succeeded } });
+      expect(await charge(req)).toEqual(failure('The authorization is no longer valid; charge the saved card with a new payment'));
+      expect(summary(calls)).toEqual(['GET /payments/pay_1', 'POST /payments/pay_1/capture', 'GET /payments/pay_1']);
+      expect(req.background).toEqual([]);
+    });
+
+    it('fails with the reason, not the saved card advice, when the Swell payment already succeeded and there is no saved card', async () => {
+      fakeRazorpay([{ ...authorized, status: 'refunded' }]);
+      const { card: _card, ...data } = base;
+      const req = request({ ...data, captured: true, $record: { captured: false, success: true } });
+      expect(await charge(req)).toEqual(failure('Payment is not authorized (status: refunded)'));
     });
 
     it('charges the saved card when Razorpay refuses the capture and the authorization is still usable', async () => {
@@ -426,6 +459,82 @@ describe('payment.charge', () => {
       const req = request(renewal);
       expect(await charge(req)).toEqual(ASYNC);
       expect(await writesOf(req)).toEqual([]);
+      expect(log).toHaveBeenCalledWith(expect.stringContaining('pay_saved'), expect.stringContaining('swell_pay_1'));
+    });
+
+    it.each([
+      ['unset', undefined],
+      ['null', null],
+    ])('creates nothing while a charge of the Swell payment is in flight (success %s)', async (_name, pendingSuccess) => {
+      const { calls } = fakeRazorpay([{ ...authorized, notes: other }]);
+      // The order's auto payment captures right after the authorize phase answered async
+      const req = request({ ...base, captured: true, $record: { captured: false, async: true, success: pendingSuccess } });
+      expect(await charge(req)).toEqual(ASYNC);
+      expect(calls).toEqual([]);
+      expect(req.background).toEqual([]);
+    });
+
+    it('captures when the Swell payment was captured before the charge finished', async () => {
+      let answer!: () => void;
+      const { calls, payment } = fakeRazorpay([], { recurringGate: new Promise<void>((resolve) => (answer = resolve)) });
+      const req = request({ ...renewal, captured: false });
+      expect(await charge(req)).toEqual(ASYNC);
+      req.record.captured = true;
+      answer();
+      expect(await writesOf(req)).toEqual(finished('pay_saved'));
+      expect(summary(calls)).toEqual(SAVED_CARD_CAPTURE);
+      expect(payment('pay_saved')).toMatchObject({ status: 'captured' });
+    });
+
+    it('captures when the Swell payment is captured right after the authorize-only write', async () => {
+      const { calls, payment } = fakeRazorpay([]);
+      const req = request({ ...renewal, captured: false });
+      const write = req.swell.put.getMockImplementation();
+      req.swell.put.mockImplementation(async (url: string, body: Record<string, unknown>) => {
+        const result = await write(url, body);
+        if (body.success) req.record.captured = true;
+        return result;
+      });
+      expect(await charge(req)).toEqual(ASYNC);
+      expect(await writesOf(req)).toEqual([...finished('pay_saved', false), ['/payments/swell_pay_1', { captured: true }]]);
+      expect(summary(calls)).toEqual(SAVED_CARD_CAPTURE);
+      expect(payment('pay_saved')).toMatchObject({ status: 'captured' });
+    });
+
+    it('logs, without another write, a capture refused after the authorize-only write', async () => {
+      const log = quietLog();
+      fakeRazorpay([], { captures: { pay_saved: 'refused' } });
+      const req = request({ ...renewal, captured: false });
+      const write = req.swell.put.getMockImplementation();
+      req.swell.put.mockImplementation(async (url: string, body: Record<string, unknown>) => {
+        const result = await write(url, body);
+        if (body.success) req.record.captured = true;
+        return result;
+      });
+      expect(await charge(req)).toEqual(ASYNC);
+      expect(await writesOf(req)).toEqual(finished('pay_saved', false));
+      expect(log).toHaveBeenCalledWith(expect.stringContaining('Capture amount is invalid'), expect.stringContaining('pay_saved'));
+    });
+
+    it('leaves the Swell payment pending when it can not be read', async () => {
+      const log = quietLog();
+      const { calls } = fakeRazorpay([]);
+      const req = request(renewal);
+      req.swell.get.mockImplementation(async (url: string) => (url === '/accounts/acc_1' ? account : null));
+      expect(await charge(req)).toEqual(ASYNC);
+      expect(await writesOf(req)).toEqual([]);
+      expect(summary(calls)).toEqual(SAVED_CARD_AUTHORIZE);
+      expect(log).toHaveBeenCalledWith(expect.stringContaining('pay_saved'), expect.stringContaining('swell_pay_1'));
+    });
+
+    it('logs a write to the Swell payment that answers without the payment', async () => {
+      const log = quietLog();
+      fakeRazorpay([]);
+      const req = request(renewal);
+      const write = req.swell.put.getMockImplementation();
+      req.swell.put.mockImplementation(async (url: string, body: Record<string, unknown>) => (url.startsWith('/payments/') ? null : write(url, body)));
+      expect(await charge(req)).toEqual(ASYNC);
+      await writesOf(req);
       expect(log).toHaveBeenCalledWith(expect.stringContaining('pay_saved'), expect.stringContaining('swell_pay_1'));
     });
 
