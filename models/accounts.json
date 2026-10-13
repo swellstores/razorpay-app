@@ -3,13 +3,11 @@
     "customer_id": {
       "type": "string",
       "label": "Razorpay customer",
-      "readonly": true,
       "description": "The Razorpay customer the account's saved cards belong to, kept by the app when the card is first saved or charged."
     },
     "contact": {
       "type": "string",
       "label": "Razorpay contact",
-      "readonly": true,
       "description": "The phone sent to Razorpay with the customer's saved card payments."
     }
   }
