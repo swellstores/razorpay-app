@@ -12,13 +12,14 @@ function request(data: Record<string, unknown>, shopper: Record<string, unknown>
 }
 
 type Call = { method: string; url: string; body?: any };
-type CaptureMode = 'taken' | 'lost' | 'error' | 'expired';
+type CaptureMode = 'taken' | 'lost' | 'refused' | 'error' | 'offline' | 'expired';
 
 /**
  * Fake Razorpay around a set of payments. GET and PATCH read and update them; capture marks one captured.
  * `captures` per payment id: 'taken' — another Swell payment captured and claimed it first, the call
- * answers with an error; 'lost' — Razorpay captured it but the answer was lost; 'error' — failed, still
- * authorized; 'expired' — failed because the authorization was released.
+ * answers with an error; 'lost' — Razorpay captured it but the answer was lost; 'refused' — Razorpay
+ * refused it (4xx), still authorized; 'error' — failed with a 5xx, still authorized; 'offline' — no answer
+ * (fetch rejects), still authorized; 'expired' — failed because the authorization was released.
  * The saved card payment (`pay_saved`) comes back `authorized`, as Razorpay answers right after
  * create/recurring, unless `recurringStatus` says otherwise; `recurringNotes: false` drops its notes.
  * GET of an id in `failGet` answers with an error.
@@ -56,7 +57,9 @@ function fakeRazorpay(
       store.set(id, { ...payment, notes: body.notes });
     } else if (action === 'capture') {
       const mode = captures[id];
+      if (mode === 'refused') return fail(400, 'Capture amount is invalid');
       if (mode === 'error') return fail(502, 'Gateway timeout');
+      if (mode === 'offline') throw new TypeError('fetch failed');
       if (mode === 'expired') {
         store.set(id, { ...payment, status: 'refunded' });
         return fail(400, 'Payment authorization has expired');
@@ -272,10 +275,20 @@ describe('payment.charge', () => {
       expect(summary(calls).slice(3)).toEqual(SAVED_CARD_CAPTURE);
     });
 
-    it('charges the saved card when the capture fails and the authorization is still usable', async () => {
-      const { calls, payment } = fakeRazorpay([authorized], { captures: { pay_1: 'error' } });
+    it('charges the saved card when Razorpay refuses the capture and the authorization is still usable', async () => {
+      const { calls, payment } = fakeRazorpay([authorized], { captures: { pay_1: 'refused' } });
       expect(await charge(request({ ...base, captured: true }))).toEqual(success('pay_saved'));
       expect(summary(calls)).toEqual(['GET /payments/pay_1', 'POST /payments/pay_1/capture', 'GET /payments/pay_1', ...SAVED_CARD_CAPTURE]);
+      expect(payment('pay_1')).toEqual(authorized);
+    });
+
+    it.each([
+      ['fails with a 5xx', 'error', 'Razorpay: Gateway timeout'],
+      ['gets no answer', 'offline', 'fetch failed'],
+    ] as const)('fails, without charging the saved card, when the capture %s and the authorization is still usable', async (_name, mode, message) => {
+      const { calls, payment } = fakeRazorpay([authorized], { captures: { pay_1: mode } });
+      expect(await charge(request({ ...base, captured: true }))).toEqual(failure(message));
+      expect(summary(calls)).toEqual(['GET /payments/pay_1', 'POST /payments/pay_1/capture', 'GET /payments/pay_1']);
       expect(payment('pay_1')).toEqual(authorized);
     });
 

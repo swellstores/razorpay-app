@@ -1,6 +1,6 @@
 import { toSubunits } from '../lib/amount';
 import type Razorpay from './lib/razorpay';
-import type { RazorpayPayment } from './lib/razorpay';
+import { RazorpayError, type RazorpayPayment } from './lib/razorpay';
 import { customerOf } from './lib/customer';
 import { getRazorpay } from './lib/settings';
 
@@ -30,6 +30,11 @@ type Outcome = { transactionId: string } | { reason: string };
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** Razorpay answered that it will not do it; a network error or a 5xx leaves the outcome unknown */
+function isRefusal(error: unknown): boolean {
+  return error instanceof RazorpayError && error.status >= 400 && error.status < 500;
 }
 
 function notesOf(payment: RazorpayPayment): Record<string, string> {
@@ -85,7 +90,10 @@ async function captureAndClaim(payment: RazorpayPayment, charge: Charge): Promis
   } catch (error) {
     const standing = standingOf(await razorpay.getPayment(payment.id), charge);
     if (standing === 'captured') return { transactionId: payment.id };
-    // Still authorized too: a failed capture cancels the order, so a fresh charge of the saved card is preferred
+    // Still authorized: the saved card is charged only when Razorpay refused the capture. After a network
+    // error or a 5xx the capture may still land, so the charge fails rather than risk taking the money twice;
+    // the merchant retries it
+    if (standing === 'authorized' && !isRefusal(error)) throw error;
     return { reason: messageOf(error) };
   }
   if (ownerOf(payment) !== swellPaymentId) {
