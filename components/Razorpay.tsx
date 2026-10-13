@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'preact/hooks';
-import type { ComponentProps, PaymentContext, PaymentSubmitResult } from '@swell/apps-sdk/components';
+import type { ComponentProps, PaymentContext, PaymentSubmitData, PaymentSubmitResult } from '@swell/apps-sdk/components';
 
 import { toSubunits } from '../lib/amount';
 import { loadRazorpay, openRazorpay, toBilling } from './lib/checkout';
@@ -19,9 +19,14 @@ interface CheckoutCart {
   shipping?: { phone?: string };
 }
 
-/** The phone the shopper gave: an account often has none before its first order */
-function contactOf(cart: CheckoutCart): string | undefined {
-  return [cart.account?.phone, cart.billing?.phone, cart.shipping?.phone].map((phone) => phone?.trim()).find(Boolean);
+/**
+ * The phone the shopper gave: an account often has none before its first order, and the billing address
+ * typed on the payment step reaches the cart only after submit, so the submitted billing comes first
+ */
+function contactOf(cart: CheckoutCart, billing: { phone?: unknown }): string | undefined {
+  return [cart.account?.phone, billing.phone, cart.billing?.phone, cart.shipping?.phone]
+    .map((phone) => (typeof phone === 'string' ? phone.trim() : ''))
+    .find(Boolean);
 }
 
 export default function Razorpay({ context, settings, on, call }: ComponentProps<never, PaymentContext<CheckoutCart>>) {
@@ -32,12 +37,12 @@ export default function Razorpay({ context, settings, on, call }: ComponentProps
 
   useEffect(() => {
     void loadRazorpay().catch(() => {});
-    return on('submit', async (): Promise<PaymentSubmitResult> => {
+    return on('submit', async ({ billing }: PaymentSubmitData): Promise<PaymentSubmitResult> => {
       if (!keyId) throw new Error('Razorpay is not configured');
       // Load the modal first, so a failed load leaves no Razorpay order behind
       const RazorpayCheckout = await loadRazorpay();
       const { cart } = latest.current;
-      const contact = contactOf(cart);
+      const contact = contactOf(cart, billing);
       const { order, customer } = await call<RazorpayIntent>('createIntent', {
         amount: toSubunits(cart.capture_total, cart.currency),
         currency: cart.currency,
