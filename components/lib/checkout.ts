@@ -37,12 +37,22 @@ export function loadRazorpay(): Promise<RazorpayConstructor> {
   });
 }
 
-/** Opens the card-only Razorpay modal for an order and resolves with the signed response */
+/**
+ * Opens the card-only Razorpay modal for an order and resolves with the signed response.
+ * A failed attempt keeps the modal open with Retry, so it only settles on success or close.
+ */
 export function openRazorpay(
   Razorpay: RazorpayConstructor,
   { keyId, order, prefill }: { keyId: string; order: RazorpayOrder; prefill?: Record<string, string | undefined> },
 ): Promise<RazorpayResponse> {
   return new Promise((resolve, reject) => {
+    let settled = false;
+    let lastError: string | undefined;
+    const settle = (finish: () => void) => {
+      if (settled) return;
+      settled = true;
+      finish();
+    };
     const checkout = new Razorpay({
       key: keyId,
       order_id: order.id,
@@ -56,10 +66,12 @@ export function openRazorpay(
           preferences: { show_default_blocks: false },
         },
       },
-      handler: resolve,
-      modal: { ondismiss: () => reject(new Error('Payment cancelled')) },
+      handler: (response: RazorpayResponse) => settle(() => resolve(response)),
+      modal: { ondismiss: () => settle(() => reject(new Error(lastError || 'Payment cancelled'))) },
     });
-    checkout.on('payment.failed', (data) => reject(new Error(data?.error?.description || 'Payment failed')));
+    checkout.on('payment.failed', (data) => {
+      lastError = data?.error?.description || lastError;
+    });
     checkout.open();
   });
 }

@@ -28,9 +28,24 @@ describe('openRazorpay', () => {
     await expect(pending).rejects.toThrow('Payment cancelled');
   });
 
-  it('rejects with the Razorpay failure description', async () => {
+  it('keeps waiting after a failed attempt and resolves when the retry succeeds', async () => {
     const pending = openRazorpay(FakeRazorpay as any, { keyId: 'k', order });
     FakeRazorpay.last.handlers['payment.failed']({ error: { description: 'Card declined' } });
+    FakeRazorpay.last.options.handler({ razorpay_order_id: 'order_1', razorpay_payment_id: 'pay_2', razorpay_signature: 's' });
+    await expect(pending).resolves.toEqual({ razorpay_order_id: 'order_1', razorpay_payment_id: 'pay_2', razorpay_signature: 's' });
+  });
+
+  it('settles once when the modal closes after a successful payment', async () => {
+    const pending = openRazorpay(FakeRazorpay as any, { keyId: 'k', order });
+    FakeRazorpay.last.options.handler({ razorpay_order_id: 'order_1', razorpay_payment_id: 'pay_1', razorpay_signature: 's' });
+    FakeRazorpay.last.options.modal.ondismiss();
+    await expect(pending).resolves.toMatchObject({ razorpay_payment_id: 'pay_1' });
+  });
+
+  it('rejects with the last failure description when the shopper closes the modal after a failed attempt', async () => {
+    const pending = openRazorpay(FakeRazorpay as any, { keyId: 'k', order });
+    FakeRazorpay.last.handlers['payment.failed']({ error: { description: 'Card declined' } });
+    FakeRazorpay.last.options.modal.ondismiss();
     await expect(pending).rejects.toThrow('Card declined');
   });
 });
