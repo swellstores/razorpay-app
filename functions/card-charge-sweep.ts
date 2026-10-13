@@ -79,7 +79,8 @@ export default async function (req: SwellRequest) {
     (await req.swell.get('/payments', {
       where: {
         async: true,
-        success: null,
+        // Not `success: null`: the query string sends it as the text "null", which matches nothing
+        status: 'pending',
         method: 'card',
         gateway,
         void: { $ne: true },

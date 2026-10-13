@@ -64,7 +64,7 @@ describe('saved card charge sweep', () => {
     expect(req.swell.get).toHaveBeenCalledWith('/payments', {
       where: {
         async: true,
-        success: null,
+        status: 'pending',
         method: 'card',
         gateway: GATEWAY,
         void: { $ne: true },
