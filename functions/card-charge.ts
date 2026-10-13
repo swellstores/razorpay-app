@@ -32,9 +32,14 @@ function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-/** Razorpay answered that it will not do it; a network error or a 5xx leaves the outcome unknown */
+/**
+ * Razorpay answered that it will not do it; a network error, a 5xx, a timeout (408) or rate limit (429)
+ * leaves the outcome unknown
+ */
 function isRefusal(error: unknown): boolean {
-  return error instanceof RazorpayError && error.status >= 400 && error.status < 500;
+  return (
+    error instanceof RazorpayError && error.status >= 400 && error.status < 500 && error.status !== 408 && error.status !== 429
+  );
 }
 
 function notesOf(payment: RazorpayPayment): Record<string, string> {
@@ -140,8 +145,9 @@ async function finalizeSavedPayment(paymentId: string, charge: Charge): Promise<
 /**
  * The saved card payment an earlier attempt of this Swell payment created, found by its order receipt:
  * after a lost answer, a retry finalizes it rather than charging the card again. A captured one comes
- * first, so it is never captured twice; created and failed payments took nothing. One it captured that
- * does not match the order fails, as its money was taken.
+ * first, so it is never captured twice; failed and released payments took nothing. One still `created`
+ * (live recurring debits wait for a pre-debit notification) will take the money later, and one it
+ * captured that does not match the order took it: both fail rather than charge the card again.
  */
 async function findSavedPayment(charge: Charge): Promise<string | undefined> {
   const { razorpay, swellPaymentId } = charge;
@@ -149,6 +155,9 @@ async function findSavedPayment(charge: Charge): Promise<string | undefined> {
   let authorized: string | undefined;
   for (const order of orders.filter((order) => order.receipt === swellPaymentId)) {
     for (const payment of await razorpay.getOrderPayments(order.id)) {
+      if (payment.status === 'created') {
+        throw new Error(`Saved card payment ${payment.id} is still pending (status: created); contact support`);
+      }
       if (payment.status !== 'authorized' && payment.status !== 'captured') continue;
       const mismatch = mismatchOf(payment, charge);
       if (payment.status === 'captured') {

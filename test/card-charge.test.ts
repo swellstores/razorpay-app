@@ -12,13 +12,14 @@ function request(data: Record<string, unknown>, shopper: Record<string, unknown>
 }
 
 type Call = { method: string; url: string; body?: any };
-type CaptureMode = 'taken' | 'lost' | 'refused' | 'error' | 'offline' | 'expired';
+type CaptureMode = 'taken' | 'lost' | 'refused' | 'error' | 'throttled' | 'offline' | 'expired';
 
 /**
  * Fake Razorpay around a set of payments and orders. GET and PATCH read and update payments; capture marks
  * one captured. `captures` per payment id: 'taken' — another Swell payment captured and claimed it first,
  * the call answers with an error; 'lost' — Razorpay captured it but the answer was lost; 'refused' —
- * Razorpay refused it (4xx), still authorized; 'error' — failed with a 5xx, still authorized; 'offline' —
+ * Razorpay refused it (4xx), still authorized; 'error' — failed with a 5xx, still authorized; 'throttled' —
+ * rate limited (429), still authorized; 'offline' —
  * no answer (fetch rejects), still authorized; 'expired' — failed because the authorization was released.
  * POST /orders stores `order_9`; GET /orders?receipt= lists the orders with that receipt (all of them with
  * `receiptFilter: false`), and GET /orders/{id}/payments the payments with that `order_id`.
@@ -90,6 +91,7 @@ function fakeRazorpay(
       const mode = captures[id];
       if (mode === 'refused') return fail(400, 'Capture amount is invalid');
       if (mode === 'error') return fail(502, 'Gateway timeout');
+      if (mode === 'throttled') return fail(429, 'Too many requests');
       if (mode === 'offline') throw new TypeError('fetch failed');
       if (mode === 'expired') {
         store.set(id, { ...payment, status: 'refunded' });
@@ -316,6 +318,7 @@ describe('payment.charge', () => {
 
     it.each([
       ['fails with a 5xx', 'error', 'Razorpay: Gateway timeout'],
+      ['is rate limited', 'throttled', 'Razorpay: Too many requests'],
       ['gets no answer', 'offline', 'fetch failed'],
     ] as const)('fails, without charging the saved card, when the capture %s and the authorization is still usable', async (_name, mode, message) => {
       const { calls, payment } = fakeRazorpay([authorized], { captures: { pay_1: mode } });
@@ -465,7 +468,6 @@ describe('payment.charge', () => {
     it('creates a new payment when the earlier ones took nothing or do not match the order', async () => {
       const ignored = [
         { ...earlier, id: 'pay_failed', status: 'failed' },
-        { ...earlier, id: 'pay_created', status: 'created' },
         { ...earlier, id: 'pay_released', status: 'refunded' },
         { ...earlier, id: 'pay_other_amount', status: 'authorized', amount: 999 },
         { ...earlier, id: 'pay_other_method', status: 'authorized', method: 'upi' },
@@ -481,6 +483,12 @@ describe('payment.charge', () => {
     it('fails, without charging again, when its captured payment does not match the order', async () => {
       const { calls } = fakeRazorpay([{ ...earlier, amount: 999 }], { orders: [earlierOrder] });
       expect(await charge(request(renewal))).toEqual(failure('Payment amount 999 INR does not match the order amount 1050 INR'));
+      expect(summary(calls)).toEqual(REUSE.slice(0, 3));
+    });
+
+    it('fails, without charging again, when its payment is still pending', async () => {
+      const { calls } = fakeRazorpay([{ ...earlier, status: 'created' }], { orders: [earlierOrder] });
+      expect(await charge(request(renewal))).toEqual(failure('Saved card payment pay_old is still pending (status: created); contact support'));
       expect(summary(calls)).toEqual(REUSE.slice(0, 3));
     });
 
