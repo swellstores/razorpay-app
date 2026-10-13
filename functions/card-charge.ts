@@ -3,14 +3,14 @@ import { customerOf } from './lib/customer';
 import {
   type Charge,
   chargeOf,
+  type FinishParams,
   findSavedPayment,
-  finishSavedPayment,
+  FINISH_WORKFLOW,
   isRefusal,
   messageOf,
   mismatchOf,
   notFinalized,
   type Outcome,
-  recordOutcome,
   settleSavedPayment,
 } from './lib/saved-charge';
 import { getRazorpay } from './lib/settings';
@@ -124,56 +124,13 @@ async function finishEarlierPayment(payment: RazorpayPayment, charge: Charge): P
   return outcome.transactionId;
 }
 
-type Customer = { id: string; email: string; contact: string };
-
-/**
- * Charges the saved card token with a new payment on `orderId`, bound to this Swell payment at creation,
- * and finishes the Swell payment by its phase as stored then. It runs after the hook answered:
- * create/recurring alone takes more than the hook's 10 seconds. Razorpay answers a successful payment
- * with the order's signature, so it is not read back; without a valid signature it is read. When the
- * outcome is unknown (an answer lost, a 5xx) or Razorpay still waits to debit it, it writes nothing: the
- * sweep finds the payment by its order receipt and finishes the Swell payment.
- */
-async function finishSavedCharge(req: SwellRequest, customer: Customer, token: string, orderId: string, charge: Charge) {
-  const { razorpay, swellPaymentId, amount, currency } = charge;
-  let paymentId: string;
-  let signature: string;
-  try {
-    const answer = await razorpay.createRecurringPayment({
-      email: customer.email,
-      contact: customer.contact,
-      amount,
-      currency,
-      order_id: orderId,
-      customer_id: customer.id,
-      token,
-      recurring: '1',
-      notes: { swell_payment_id: swellPaymentId },
-    });
-    paymentId = answer.razorpay_payment_id;
-    signature = answer.razorpay_signature ?? '';
-    // Not a refusal: the outcome stays unknown
-    if (typeof paymentId !== 'string' || !paymentId) throw new Error('Razorpay did not return a payment');
-  } catch (error) {
-    if (isRefusal(error)) return recordOutcome(req, charge, { reason: messageOf(error) });
-    console.error(`Saved card payment on ${orderId} has an unknown outcome: ${messageOf(error)}`, `(Swell payment ${swellPaymentId})`);
-    return;
-  }
-  try {
-    const signed = await razorpay.verifySignature(orderId, paymentId, signature);
-    await finishSavedPayment(req, charge, paymentId, signed ? 'authorized' : undefined);
-  } catch (error) {
-    console.error(`Saved card payment ${paymentId} has an unknown outcome: ${messageOf(error)}`, `(Swell payment ${swellPaymentId})`);
-  }
-}
-
 /**
  * Charges the saved card. The platform gives the whole charge 10 seconds and each Razorpay call takes
  * about 2, so everything that can runs in parallel: the customer, the payment of an earlier attempt and
- * the order for a new one. An earlier payment is finished here; a new one is charged in the background
- * and the Swell payment stays pending (`async`) until it is recorded. The order never captures it
- * (Razorpay leaves a recurring payment authorized whatever `payment_capture` says), so the capture is
- * explicit.
+ * the order for a new one. An earlier payment is finished here. A new one is charged by the
+ * `card-charge-finish` workflow, since create/recurring alone takes more than 6 seconds, and the Swell
+ * payment stays pending (`async`) until the workflow records it. The order never captures it (Razorpay
+ * leaves a recurring payment authorized whatever `payment_capture` says), so the capture is explicit.
  */
 async function chargeSavedCard(req: SwellRequest, token: string, charge: Charge) {
   const { razorpay, swellPaymentId, amount, currency } = charge;
@@ -201,7 +158,17 @@ async function chargeSavedCard(req: SwellRequest, token: string, charge: Charge)
   }
   if (customer.status === 'rejected') throw customer.reason;
   if (order.status === 'rejected') throw order.reason;
-  req.context.waitUntil(finishSavedCharge(req, customer.value, token, order.value.id, charge));
+  // Identifiers only: the workflow reads the keys from the settings, and the capture from the Swell payment.
+  // A failure to start it fails the charge: nothing was charged, only an unused order exists
+  const params: FinishParams = {
+    swell_payment_id: swellPaymentId,
+    razorpay_order_id: order.value.id,
+    amount,
+    currency,
+    token,
+    customer: { id: customer.value.id, email: customer.value.email, contact: customer.value.contact },
+  };
+  await req.swell.workflows.create(FINISH_WORKFLOW, params);
   return { async: true };
 }
 

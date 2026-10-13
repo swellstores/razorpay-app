@@ -54,18 +54,18 @@ async function sweepPayment(req: SwellRequest, razorpay: Razorpay, pending: Pend
   if (!payment) {
     const startedAt = Math.max(Date.parse(pending.date_created ?? '') || 0, ...orders.map((order) => (order.created_at ?? 0) * 1000));
     if (orders.length > 0 && now - startedAt > ABANDONED_AFTER) {
-      await recordOutcome(req, charge, { reason: 'The saved card charge did not complete' });
+      await recordOutcome(req.swell, charge, { reason: 'The saved card charge did not complete' });
     }
     return;
   }
   // A captured one that does not match the order took the money: it fails rather than charge again
   const mismatch = payment.status === 'captured' && mismatchOf(payment, charge);
   if (mismatch) {
-    await recordOutcome(req, charge, { reason: notFinalized(payment.id, mismatch) }, payment.id);
+    await recordOutcome(req.swell, charge, { reason: notFinalized(payment.id, mismatch) }, payment.id);
     return;
   }
   // The list's status is as fresh as a read; a `created` one waits for the pre-debit notification
-  await finishSavedPayment(req, charge, payment.id, payment.status);
+  await finishSavedPayment(req.swell, charge, payment.id, payment.status);
 }
 
 export default async function (req: SwellRequest) {

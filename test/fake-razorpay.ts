@@ -21,14 +21,14 @@ export const summary = (calls: Call[]) => calls.map(({ method, url }) => `${meth
  * The saved card payment (`pay_saved`) comes back `authorized`, as Razorpay answers right after
  * create/recurring, unless `recurringStatus` says otherwise; `recurringNotes: false` drops its notes;
  * `loseRecurring` loses the first create/recurring answer after creating the payment; `refuseRecurring`
- * refuses it (4xx) without creating one; create/recurring answers only once `recurringGate` resolves.
+ * refuses it (4xx) without creating one; `recurringDown` fails it (5xx) without creating one; create/recurring answers only once `recurringGate` resolves.
  * `failOrder` fails POST /orders. GET of an id in `failGet` answers with an error; `failLookup` fails the orders or order payments list.
  */
 export function fakeRazorpay(
   payments: Record<string, unknown>[],
   {
     orders = [], captures = {}, recurringStatus = 'authorized', recurringNotes = true, recurringSignature = true, loseRecurring = false,
-    refuseRecurring = false, recurringGate, failOrder = false, receiptFilter = true, failGet = [], failLookup, patch,
+    refuseRecurring = false, recurringDown = false, recurringGate, failOrder = false, receiptFilter = true, failGet = [], failLookup, patch,
   }: {
     orders?: Record<string, unknown>[];
     captures?: Record<string, CaptureMode>;
@@ -37,6 +37,7 @@ export function fakeRazorpay(
     recurringSignature?: boolean;
     loseRecurring?: boolean;
     refuseRecurring?: boolean;
+    recurringDown?: boolean;
     recurringGate?: Promise<unknown>;
     failOrder?: boolean;
     receiptFilter?: boolean;
@@ -76,6 +77,7 @@ export function fakeRazorpay(
     if (path === '/payments/create/recurring') {
       await recurringGate;
       if (refuseRecurring) return fail(400, 'The token is invalid');
+      if (recurringDown) return fail(503, 'Service unavailable');
       const notes = recurringNotes ? body.notes : [];
       // Razorpay answers `authorized` and does not capture it, whatever the order's `payment_capture`
       store.set('pay_saved', { id: 'pay_saved', status: recurringStatus, amount: body.amount, currency: body.currency, method: 'card', order_id: body.order_id, notes });
@@ -117,5 +119,11 @@ export function fakeRazorpay(
     }
     return Response.json(store.get(id));
   }));
-  return { calls, payment: (id: string) => store.get(id), order: (id: string) => orderStore.get(id) };
+  return {
+    calls,
+    payment: (id: string) => store.get(id),
+    order: (id: string) => orderStore.get(id),
+    /** Changes a payment, as Razorpay does on its own (a live debit) */
+    update: (id: string, changes: Record<string, unknown>) => store.set(id, { ...store.get(id)!, ...changes }),
+  };
 }
