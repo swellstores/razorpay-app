@@ -30,6 +30,8 @@ export interface RazorpayOrder {
   amount: number;
   currency: string;
   receipt?: string;
+  /** Unix time in seconds */
+  created_at?: number;
 }
 
 const SIGNATURE = /^[0-9a-f]{64}$/i;

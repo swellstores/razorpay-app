@@ -1,6 +1,6 @@
 import { toSubunits } from '../../lib/amount';
 import type Razorpay from './razorpay';
-import { RazorpayError, type RazorpayPayment } from './razorpay';
+import { RazorpayError, type RazorpayOrder, type RazorpayPayment } from './razorpay';
 
 /** What charging a Swell payment needs, shared by the charge and the sweep that finishes it */
 export interface Charge {
@@ -66,22 +66,22 @@ export function notFinalized(paymentId: string, reason: string): string {
  * payment ids are 24 characters, Razorpay takes 40). A captured one comes first, so it is never captured
  * twice; failed and released payments took nothing and are skipped. One still `created` (live recurring
  * debits wait for a pre-debit notification) will take the money later, and one captured that does not
- * match the order took it: the caller must not charge the card again for either. `ordered` tells whether
- * any order has this receipt, which only this app creates.
+ * match the order took it: the caller must not charge the card again for either. `orders` are the orders
+ * with this receipt, which only this app creates.
  */
-export async function findSavedPayment(charge: Charge): Promise<{ ordered: boolean; payment?: RazorpayPayment }> {
+export async function findSavedPayment(charge: Charge): Promise<{ orders: RazorpayOrder[]; payment?: RazorpayPayment }> {
   const { razorpay, swellPaymentId } = charge;
   const orders = (await razorpay.findOrdersByReceipt(swellPaymentId)).filter((order) => order.receipt === swellPaymentId);
   let authorized: RazorpayPayment | undefined;
   for (const order of orders) {
     for (const payment of await razorpay.getOrderPayments(order.id)) {
       if (payment.status === 'created' || payment.status === 'captured') {
-        return { ordered: true, payment };
+        return { orders, payment };
       }
       if (payment.status === 'authorized' && !mismatchOf(payment, charge)) authorized ??= payment;
     }
   }
-  return { ordered: orders.length > 0, payment: authorized };
+  return { orders, payment: authorized };
 }
 
 /**
