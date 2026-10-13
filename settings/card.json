@@ -1,0 +1,8 @@
+{
+  "label": "Razorpay",
+  "description": "Razorpay API keys from Dashboard → Account & Settings → API Keys",
+  "fields": [
+    { "id": "key_id", "label": "Key ID", "type": "text", "public": true, "required": true },
+    { "id": "key_secret", "label": "Key secret", "type": "text", "required": true }
+  ]
+}
