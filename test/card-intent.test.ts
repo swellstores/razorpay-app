@@ -72,6 +72,13 @@ describe('payment.create_intent', () => {
     expect(calls[0].body.contact).toBe('+911234567890');
   });
 
+  it('fails without creating the order when Razorpay returns no customer', async () => {
+    const fetch = vi.fn(async () => Response.json({}));
+    vi.stubGlobal('fetch', fetch);
+    expect(await createIntent(request({ intent: { amount: 1050, currency: 'INR' } }))).toEqual({ error: 'Razorpay did not return a customer' });
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
   it('fails without an account, before calling Razorpay', async () => {
     const fetch = vi.fn();
     vi.stubGlobal('fetch', fetch);

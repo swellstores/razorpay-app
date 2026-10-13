@@ -14,6 +14,17 @@ export interface RazorpayPayment {
   token?: { id: string; card?: { last4?: string; network?: string; expiry_month?: string; expiry_year?: string } };
 }
 
+/** Razorpay answered with an error status; a request that never got an answer rejects with fetch's error instead */
+export class RazorpayError extends Error {
+  status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = 'RazorpayError';
+    this.status = status;
+  }
+}
+
 const SIGNATURE = /^[0-9a-f]{64}$/i;
 
 function hexToBytes(hex: string): Uint8Array<ArrayBuffer> {
@@ -40,7 +51,7 @@ export default class Razorpay {
     });
     const data = await response.json().catch(() => ({}));
     if (!response.ok) {
-      throw new Error(`Razorpay: ${data?.error?.description || response.statusText || response.status}`);
+      throw new RazorpayError(`Razorpay: ${data?.error?.description || response.statusText || response.status}`, response.status);
     }
     return data as T;
   }
@@ -49,8 +60,12 @@ export default class Razorpay {
     return this.#request<{ id: string; amount: number; currency: string }>('/orders', 'POST', data);
   }
 
-  createCustomer(data: Record<string, unknown>) {
-    return this.#request<{ id: string }>('/customers', 'POST', data);
+  async createCustomer(data: Record<string, unknown>): Promise<{ id: string }> {
+    const customer = await this.#request<{ id?: unknown }>('/customers', 'POST', data);
+    if (typeof customer?.id !== 'string' || !customer.id) {
+      throw new Error('Razorpay did not return a customer');
+    }
+    return { ...customer, id: customer.id };
   }
 
   getPayment(id: string, expand?: 'card' | 'token') {
