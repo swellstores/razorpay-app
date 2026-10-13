@@ -13,10 +13,18 @@ export interface RazorpayOrder {
   currency: string;
 }
 
+export interface RazorpayIntent {
+  order: RazorpayOrder;
+  customer: { id: string };
+}
+
 export interface VerifiedPayment {
   id: string;
   status: string;
-  card?: { last4?: string; network?: string };
+  token?: {
+    id: string;
+    card?: { last4?: string; network?: string; expiry_month?: string | number; expiry_year?: string | number };
+  };
 }
 
 type RazorpayConstructor = new (options: Record<string, unknown>) => {
@@ -45,12 +53,12 @@ export function loadRazorpay(): Promise<RazorpayConstructor> {
 }
 
 /**
- * Opens the card-only Razorpay modal for an order and resolves with the signed response.
+ * Opens the card-only Razorpay modal for an order, saving the card on the customer, and resolves with the signed response.
  * A failed attempt keeps the modal open with Retry, so it only settles on success or close.
  */
 export function openRazorpay(
   Razorpay: RazorpayConstructor,
-  { keyId, order, prefill }: { keyId: string; order: RazorpayOrder; prefill?: Record<string, string | undefined> },
+  { keyId, order, customerId, prefill }: { keyId: string; order: RazorpayOrder; customerId: string; prefill?: Record<string, string | undefined> },
 ): Promise<RazorpayResponse> {
   return new Promise((resolve, reject) => {
     let settled = false;
@@ -63,6 +71,8 @@ export function openRazorpay(
     const checkout = new Razorpay({
       key: keyId,
       order_id: order.id,
+      customer_id: customerId,
+      recurring: '1',
       amount: order.amount,
       currency: order.currency,
       prefill,
@@ -83,14 +93,23 @@ export function openRazorpay(
   });
 }
 
-/** Billing the checkout saves for the verified payment */
+/** Billing the checkout saves for the verified payment: the saved card token and the payment to finalize */
 export function toBilling(payment: VerifiedPayment) {
   if (payment.status !== 'authorized' && payment.status !== 'captured') {
     throw new Error('Payment was not authorized');
   }
+  const { token } = payment;
+  if (!token?.id) throw new Error('The card could not be saved');
+  const { card } = token;
   return {
     billing: {
-      card: { token: payment.id, last4: payment.card?.last4, brand: payment.card?.network },
+      card: {
+        token: token.id,
+        last4: card?.last4,
+        brand: card?.network,
+        exp_month: Number(card?.expiry_month),
+        exp_year: Number(card?.expiry_year),
+      },
       intent: { razorpay: { id: payment.id } },
     },
   };

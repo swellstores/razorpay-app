@@ -9,7 +9,8 @@
     {
       "id": "card",
       "type": "payment",
-      "method": "card"
+      "method": "card",
+      "subscriptions": true
     }
   ]
 }

@@ -3,7 +3,7 @@ import type { ComponentProps, PaymentContext, PaymentSubmitResult } from '@swell
 
 import { toSubunits } from '../lib/amount';
 import { loadRazorpay, openRazorpay, toBilling } from './lib/checkout';
-import type { RazorpayOrder, RazorpayResponse, VerifiedPayment } from './lib/checkout';
+import type { RazorpayIntent, RazorpayResponse, VerifiedPayment } from './lib/checkout';
 
 export const config = {
   description: 'Razorpay checkout',
@@ -31,13 +31,14 @@ export default function Razorpay({ context, settings, on, call }: ComponentProps
       // Load the modal first, so a failed load leaves no Razorpay order behind
       const RazorpayCheckout = await loadRazorpay();
       const { cart } = latest.current;
-      const { order } = await call<{ order: RazorpayOrder }>('createIntent', {
+      const { order, customer } = await call<RazorpayIntent>('createIntent', {
         amount: toSubunits(cart.capture_total, cart.currency),
         currency: cart.currency,
       });
       const response = await openRazorpay(RazorpayCheckout, {
         keyId,
         order,
+        customerId: customer.id,
         prefill: { email: cart.account?.email, name: cart.account?.name, contact: cart.account?.phone || cart.billing?.phone },
       });
       const payment = await call<VerifiedPayment>('getIntent', response satisfies RazorpayResponse);

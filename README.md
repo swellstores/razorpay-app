@@ -4,20 +4,20 @@ Razorpay app for Swell. It is the gateway behind Swell's native card payment met
 
 ## How it works
 
-Payments are two-phase:
+The card is saved, and every payment is finalized on the server:
 
-1. **Authorize.** The app creates a Razorpay order with manual capture (`payment.create_intent`), and the checkout component opens the Razorpay modal for it. The shopper authorizes the card in the modal; after a failed attempt the modal stays open so the shopper can retry. The app verifies the payment signature. Razorpay releases an authorization that is not captured within 60 minutes (`manual_expiry_period: 60`); Swell captures right after authorizing.
-2. **Capture.** Swell calls `payment.charge` twice for the order. The first call (`captured: false`) checks that the payment is an authorized card payment whose amount and currency match the order, and binds it to the Swell payment by writing `notes.swell_payment_id` on the Razorpay payment. The second call (`captured: true`) repeats the checks and captures it.
+1. **Tokenize.** The app creates a Razorpay customer from the Swell account and an order with manual capture and a recurring token (`payment.create_intent`). The checkout component opens the Razorpay modal for it. The shopper authorizes the card, which Razorpay saves on the customer as a recurring token; after a failed attempt the modal stays open so the shopper can retry. The app verifies the payment signature (`payment.get_intent`) and the component saves the card token, its brand, last four digits and expiry, and the authorized payment id as billing.
+2. **Finalize.** Swell calls `payment.charge` for the order, once to authorize and once to capture (or once, depending on the store's capture setting). The app captures the shopper's authorization if it is still valid and not owned by another Swell payment. Razorpay keeps an authorization for up to 5 days, so a merchant can capture later with automatic capture off. If there is no usable authorization (expired, released, taken by another payment, or no checkout at all as in a renewal or an admin charge), the app charges the saved card with a new recurring payment.
 
-The browser chooses which Razorpay payment the checkout saves, so the charge is the trusted check. A Razorpay payment bound to another Swell payment is refused, and an already captured payment is accepted only for the Swell payment it is bound to (a retry).
+The browser chooses which Razorpay payment and card token the checkout saves, so the charge is the trusted check: it verifies amount, currency and method, and binds a captured payment to its Swell payment with `notes.swell_payment_id`. A payment bound to another Swell payment is refused. An already captured payment that is not recorded is never charged again; the charge fails and the merchant must contact support.
 
 Refunds go through `payment.refund`.
 
 | Function | Purpose |
 | --- | --- |
-| `functions/card-intent-create.ts` | Creates the Razorpay order for the modal |
-| `functions/card-intent-get.ts` | Verifies the modal's HMAC signature and loads the payment |
-| `functions/card-charge.ts` | Checks the authorization, then captures it |
+| `functions/card-intent-create.ts` | Creates the Razorpay customer and the order for the modal |
+| `functions/card-intent-get.ts` | Verifies the modal's HMAC signature and loads the payment with its saved card |
+| `functions/card-charge.ts` | Captures the authorization or charges the saved card |
 | `functions/card-refund.ts` | Refunds a payment |
 
 Settings are in `settings/card.json`:
@@ -33,6 +33,7 @@ The checkout component (`components/Razorpay.tsx`) renders in the hosted checkou
 2. In Swell, go to Settings → Payments → Card and choose Razorpay as the gateway.
 3. Enter the Key ID and Key secret from the Razorpay Dashboard (Account & Settings → API Keys).
 4. Click Save. The card extension only activates after you save.
+5. In the Razorpay Dashboard, make sure the account can take recurring card payments (card tokenization with recurring charges). Without it the modal cannot save the card and server-side charges fail.
 
 ## Installing
 
@@ -62,10 +63,10 @@ swell app dev       # local development
 swell logs --type function --app=.
 ```
 
-For each order, the logs should show two `payment.charge` calls with the same `transaction_id`: one for the authorization check and one for the capture.
+For each order, the logs should show `payment.charge` calls whose `transaction_id` is the captured Razorpay payment, or the new recurring payment when the saved card was charged.
 
 ## Limits
 
 - Cards only.
-- No subscriptions and no saved cards. These would need Razorpay recurring tokens.
+- Subscriptions are supported (`subscriptions: true` on the card extension): renewals charge the saved card token without a checkout. A card saved without recurring support cannot be charged later.
 - Currencies follow Razorpay. Amounts are sent in the currency's smallest unit, and zero-decimal and three-decimal currencies are handled in `lib/amount.ts`.
