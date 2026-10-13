@@ -263,6 +263,16 @@ describe('card-charge-finish workflow', () => {
       expect(writesOf(req)).toEqual(finished());
     });
 
+    it('takes the payment from its order, without waiting, when Razorpay answers without the payment id', async () => {
+      const { calls } = fakeRazorpay([], { orders: [order], recurringNoId: true });
+      const { req } = request();
+      const { step, log } = fakeStep();
+      await run(req, step);
+      expect(log).toEqual(['check pending', 'charge saved card', 'capture', 'record']);
+      expect(summary(calls)).toEqual([ON_ORDER, RECURRING, 'GET /orders/order_9/payments', CAPTURE]);
+      expect(writesOf(req)).toEqual(finished());
+    });
+
     it('fails the Swell payment when no payment is found by the order receipt', async () => {
       quietLog();
       const { calls } = fakeRazorpay([], { orders: [order], recurringDown: true });

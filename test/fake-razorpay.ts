@@ -21,14 +21,14 @@ export const summary = (calls: Call[]) => calls.map(({ method, url }) => `${meth
  * The saved card payment (`pay_saved`) comes back `authorized`, as Razorpay answers right after
  * create/recurring, unless `recurringStatus` says otherwise; `recurringNotes: false` drops its notes;
  * `loseRecurring` loses the first create/recurring answer after creating the payment; `refuseRecurring`
- * refuses it (4xx) without creating one; `recurringDown` fails it (5xx) without creating one; create/recurring answers only once `recurringGate` resolves.
+ * refuses it (4xx) without creating one; `recurringDown` fails it (5xx) without creating one; `recurringNoId` creates it but answers without its id; create/recurring answers only once `recurringGate` resolves.
  * `failOrder` fails POST /orders. GET of an id in `failGet` answers with an error; `failLookup` fails the orders or order payments list.
  */
 export function fakeRazorpay(
   payments: Record<string, unknown>[],
   {
     orders = [], captures = {}, recurringStatus = 'authorized', recurringNotes = true, recurringSignature = true, loseRecurring = false,
-    refuseRecurring = false, recurringDown = false, recurringGate, failOrder = false, receiptFilter = true, failGet = [], failLookup, patch,
+    refuseRecurring = false, recurringDown = false, recurringNoId = false, recurringGate, failOrder = false, receiptFilter = true, failGet = [], failLookup, patch,
   }: {
     orders?: Record<string, unknown>[];
     captures?: Record<string, CaptureMode>;
@@ -38,6 +38,7 @@ export function fakeRazorpay(
     loseRecurring?: boolean;
     refuseRecurring?: boolean;
     recurringDown?: boolean;
+    recurringNoId?: boolean;
     recurringGate?: Promise<unknown>;
     failOrder?: boolean;
     receiptFilter?: boolean;
@@ -85,6 +86,8 @@ export function fakeRazorpay(
         lose = false;
         return fail(504, 'Gateway timeout');
       }
+      // Seen in e2e: Razorpay authorized the card debit but answered without the payment id
+      if (recurringNoId) return Response.json({ razorpay_order_id: body.order_id });
       // Razorpay signs a successful payment with the order, as the checkout modal does
       const signed = recurringSignature && ['authorized', 'captured'].includes(recurringStatus);
       const signature = createHmac('sha256', settings.key_secret).update(`${body.order_id}|pay_saved`).digest('hex');

@@ -78,7 +78,13 @@ async function createPayment(charge: Charge, params: FinishParams): Promise<Crea
       notes: { swell_payment_id: params.swell_payment_id },
     });
     const paymentId = answer.razorpay_payment_id;
-    if (typeof paymentId !== 'string' || !paymentId) throw new Error('Razorpay did not return a payment');
+    if (typeof paymentId !== 'string' || !paymentId) {
+      // Razorpay may answer a card debit without the payment id while it still authorizes it: the order holds
+      // only this payment, so take it from there. The keys (never values) of the answer help support.
+      const found = await paymentOnOrder(charge, params.razorpay_order_id);
+      if (found) return found;
+      throw new Error(`Razorpay did not return a payment (answer: ${Object.keys(answer ?? {}).join(', ') || 'empty'})`);
+    }
     const signed = await razorpay.verifySignature(params.razorpay_order_id, paymentId, answer.razorpay_signature ?? '');
     return signed ? { paymentId, status: 'authorized' } : { paymentId };
   } catch (error) {
