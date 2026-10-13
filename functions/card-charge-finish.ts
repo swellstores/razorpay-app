@@ -96,6 +96,10 @@ export default class CardChargeFinish {
         return true;
       });
 
+    // The sweep fails a charge left without a payment for 30 minutes: a run that starts after it charges nothing
+    const pending = await step.do('check pending', RETRIES, async () => (await readSwellPayment(req.swell, charge)).success == null);
+    if (!pending) return false;
+
     // 1. Create the payment, once
     let created: Created;
     try {

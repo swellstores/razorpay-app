@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import sweep from '../functions/card-charge-sweep';
+import sweep, { config } from '../functions/card-charge-sweep';
 import { fakeRazorpay, settings, summary } from './fake-razorpay';
 
 const NOW = Date.parse('2026-10-13T12:00:00.000Z');
@@ -57,7 +57,11 @@ const finished = (transactionId: string, captured = true) => [
 const failed = (message: string) => [['/payments/swell_pay_1', { success: false, error: { message } }]];
 
 describe('saved card charge sweep', () => {
-  it('lists the newest 10 pending card payments of this app\'s gateway, of the last 8 days but not the last 2 minutes', async () => {
+  it('runs every 30 minutes, as a safety net for the finishing workflow', () => {
+    expect(config.cron).toEqual({ schedule: '*/30 * * * *' });
+  });
+
+  it('lists the newest 10 pending card payments of this app\'s gateway, of the last 8 days but not the last 30 minutes, when a workflow may still run', async () => {
     fakeRazorpay([]);
     const req = request([]);
     await sweep(req);
@@ -68,7 +72,7 @@ describe('saved card charge sweep', () => {
         method: 'card',
         gateway: GATEWAY,
         void: { $ne: true },
-        date_created: { $lt: ago(2), $gt: ago(8 * 24 * 60) },
+        date_created: { $lt: ago(30), $gt: ago(8 * 24 * 60) },
       },
       sort: 'date_created desc',
       limit: 10,

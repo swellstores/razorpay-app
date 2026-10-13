@@ -105,7 +105,7 @@ describe('card-charge-finish workflow', () => {
     const { req } = request();
     const { step, log } = fakeStep();
     await run(req, step);
-    expect(log).toEqual(['charge saved card', 'capture', 'record']);
+    expect(log).toEqual(['check pending', 'charge saved card', 'capture', 'record']);
     expect(summary(calls)).toEqual([RECURRING, CAPTURE]);
     expect(calls[0].body).toEqual({
       email: 'ada@example.com', contact: '+911234567890', amount: 1050, currency: 'INR',
@@ -129,7 +129,7 @@ describe('card-charge-finish workflow', () => {
       const { req } = request({ captured: false });
       const { step, log } = fakeStep();
       await run(req, step);
-      expect(log).toEqual(['charge saved card', 'capture', 'record', 'late capture']);
+      expect(log).toEqual(['check pending', 'charge saved card', 'capture', 'record', 'late capture']);
       expect(summary(calls)).toEqual([RECURRING]);
       expect(payment('pay_saved')).toMatchObject({ status: 'authorized' });
       expect(writesOf(req)).toEqual(finished(false));
@@ -156,7 +156,7 @@ describe('card-charge-finish workflow', () => {
     const { req } = request();
     const { step, log } = fakeStep();
     await run(req, step);
-    expect(log).toEqual(['charge saved card', 'read payment', 'capture', 'record']);
+    expect(log).toEqual(['check pending', 'charge saved card', 'read payment', 'capture', 'record']);
     expect(summary(calls)).toEqual([RECURRING, READ, CAPTURE]);
     expect(writesOf(req)).toEqual(finished());
   });
@@ -168,6 +168,7 @@ describe('card-charge-finish workflow', () => {
       const { step, log } = fakeStep((name) => name === 'wait for debit 2' && razorpay.update('pay_saved', { status: 'authorized' }));
       await run(req, step);
       expect(log).toEqual([
+        'check pending',
         'charge saved card',
         'read payment',
         'sleep wait for debit 1 (6 hours)',
@@ -198,7 +199,7 @@ describe('card-charge-finish workflow', () => {
     const { req } = request();
     const { step, log } = fakeStep();
     await run(req, step);
-    expect(log).toEqual(['charge saved card', 'read payment', 'record']);
+    expect(log).toEqual(['check pending', 'charge saved card', 'read payment', 'record']);
     expect(summary(calls)).toEqual([RECURRING, READ]);
     expect(writesOf(req)).toEqual(failed('Saved card payment pay_saved was not finalized: Payment is not authorized (status: failed)'));
   });
@@ -209,7 +210,7 @@ describe('card-charge-finish workflow', () => {
     const { req } = request();
     const { step, log } = fakeStep();
     await run(req, step);
-    expect(log).toEqual(['charge saved card', 'record']);
+    expect(log).toEqual(['check pending', 'charge saved card', 'record']);
     expect(summary(calls)).toEqual([RECURRING]);
     expect(writesOf(req)).toEqual(failed('Razorpay: The token is invalid'));
   });
@@ -220,7 +221,7 @@ describe('card-charge-finish workflow', () => {
       const { req } = request();
       const { step, log } = fakeStep();
       await run(req, step);
-      expect(log).toEqual(['charge saved card', 'sleep wait for Razorpay (1 minute)', 'find by receipt', 'capture', 'record']);
+      expect(log).toEqual(['check pending', 'charge saved card', 'sleep wait for Razorpay (1 minute)', 'find by receipt', 'capture', 'record']);
       expect(summary(calls)).toEqual([RECURRING, 'GET /orders?receipt=swell_pay_1&count=100', 'GET /orders/order_9/payments', CAPTURE]);
       expect(writesOf(req)).toEqual(finished());
     });
@@ -231,7 +232,7 @@ describe('card-charge-finish workflow', () => {
       const { req } = request();
       const { step, log } = fakeStep();
       await run(req, step);
-      expect(log).toEqual(['charge saved card', 'sleep wait for Razorpay (1 minute)', 'find by receipt', 'record']);
+      expect(log).toEqual(['check pending', 'charge saved card', 'sleep wait for Razorpay (1 minute)', 'find by receipt', 'record']);
       expect(summary(calls).filter((call) => call === RECURRING)).toHaveLength(1);
       expect(writesOf(req)).toEqual(failed('The saved card charge did not complete'));
     });
@@ -242,6 +243,7 @@ describe('card-charge-finish workflow', () => {
       const { step, log } = fakeStep((name) => name === 'wait for debit 1' && razorpay.update('pay_saved', { status: 'authorized' }));
       await run(req, step);
       expect(log).toEqual([
+        'check pending',
         'charge saved card',
         'sleep wait for Razorpay (1 minute)',
         'find by receipt',
@@ -283,12 +285,28 @@ describe('card-charge-finish workflow', () => {
     expect(req.swell.put).toHaveBeenCalledTimes(4);
   });
 
-  it('does not write over a Swell payment the sweep finished meanwhile', async () => {
-    fakeRazorpay([], { orders: [order] });
-    const { req } = request({ captured: true, success: true, transaction_id: 'pay_saved' });
+  it('charges nothing for a Swell payment that already has its result (the sweep failed it before the run started)', async () => {
+    const { calls } = fakeRazorpay([], { orders: [order] });
+    const { req } = request({ captured: true, success: false });
     const { step, log } = fakeStep();
     await run(req, step);
-    expect(log).toEqual(['charge saved card', 'capture', 'record']);
+    expect(log).toEqual(['check pending']);
+    expect(calls).toEqual([]);
+    expect(writesOf(req)).toEqual([]);
+  });
+
+  it('does not write over a Swell payment the sweep finished meanwhile', async () => {
+    fakeRazorpay([], { orders: [order] });
+    const { req, stored } = request();
+    const { step, log } = fakeStep();
+    const create = step.do;
+    step.do = async (name: string, ...rest: any[]) => {
+      const result = await create(name, ...rest);
+      if (name === 'capture') Object.assign(stored, { success: true, transaction_id: 'pay_saved' });
+      return result;
+    };
+    await run(req, step);
+    expect(log).toEqual(['check pending', 'charge saved card', 'capture', 'record']);
     expect(writesOf(req)).toEqual([]);
   });
 

@@ -3,13 +3,13 @@ import { chargeOf, findSavedPayment, finishSavedPayment, messageOf, mismatchOf, 
 import { getRazorpay } from './lib/settings';
 
 export const config: SwellConfig = {
-  description: 'Finish the saved card charges left pending: lost answers and live recurring debits',
-  cron: { schedule: '*/5 * * * *' },
+  description: 'Finish the saved card charges whose workflow failed or was stopped',
+  cron: { schedule: '*/30 * * * *' },
 };
 
 const MINUTE = 60 * 1000;
-/** The charge's background work has had its time */
-const SETTLED_AFTER = 2 * MINUTE;
+/** The card-charge-finish workflow finishes a charge; the sweep only takes those it left after 30 minutes */
+const SETTLED_AFTER = 30 * MINUTE;
 /** An order of the charge still without a Razorpay payment never gets one */
 const ABANDONED_AFTER = 30 * MINUTE;
 /** Live recurring debits wait about 36 hours for the pre-debit notification; older charges are left alone */
@@ -46,7 +46,7 @@ async function gatewayOf(req: SwellRequest): Promise<string | undefined> {
  * Finishes one pending Swell payment by the rules of the charge, from the saved card payment found by its
  * order receipt. Without an order of that receipt it is not this app's charge. An order without a payment
  * fails only once it is 30 minutes old: the newest order is the latest attempt, so an old Swell payment
- * charged again just now is not failed under the charge's background work.
+ * charged again just now is not failed under its workflow.
  */
 async function sweepPayment(req: SwellRequest, razorpay: Razorpay, pending: PendingPayment, now: number) {
   const charge = chargeOf(razorpay, pending);
