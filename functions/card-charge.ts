@@ -127,18 +127,24 @@ async function chargeShopperPayment(paymentId: string, charge: Charge): Promise<
  * for this Swell payment, now or in an earlier attempt found by its order receipt, so no owner checks:
  * its notes may be absent.
  */
-async function finalizeSavedPayment(paymentId: string, charge: Charge): Promise<void> {
+async function finalizeSavedPayment(paymentId: string, charge: Charge, created: boolean): Promise<void> {
   const { razorpay } = charge;
-  const { status } = await razorpay.getPayment(paymentId);
-  if (status === 'captured') return;
-  if (status !== 'authorized') {
-    throw new Error(`Payment is not authorized (status: ${status})`);
+  // A payment created just now is captured straight away: one Razorpay call less, as the platform gives
+  // the whole charge 10 seconds. The capture answers for its status; a failed one is read back below.
+  if (!(created && charge.capture)) {
+    const { status } = await razorpay.getPayment(paymentId);
+    if (status === 'captured') return;
+    if (status !== 'authorized') {
+      throw new Error(`Payment is not authorized (status: ${status})`);
+    }
+    if (!charge.capture) return;
   }
-  if (!charge.capture) return;
   try {
     await razorpay.capturePayment(paymentId, charge.amount, charge.currency);
   } catch (error) {
-    if ((await razorpay.getPayment(paymentId)).status !== 'captured') throw error;
+    const { status } = await razorpay.getPayment(paymentId);
+    if (status === 'captured') return;
+    throw status === 'authorized' ? error : new Error(`Payment is not authorized (status: ${status})`);
   }
 }
 
@@ -196,12 +202,22 @@ async function chargeSavedCard(req: SwellRequest, token: string, charge: Charge)
   if (!accountId) {
     throw new Error('No account for this charge');
   }
-  // The Razorpay customer the card was saved for
-  const customer = await customerOf(req, charge.razorpay, accountId, 'charge the saved card');
+  // In parallel, to stay within the platform's 10 seconds: the Razorpay customer the card was saved for,
+  // needed only for a new payment, and the payment of an earlier attempt
+  const [customer, earlier] = await Promise.allSettled([
+    customerOf(req, charge.razorpay, accountId, 'charge the saved card'),
+    findSavedPayment(charge),
+  ]);
   // A failed lookup fails the charge: a new payment is created only when no earlier one took the money
-  const paymentId = (await findSavedPayment(charge)) ?? (await createSavedPayment(customer, token, charge));
+  if (earlier.status === 'rejected') throw earlier.reason;
+  let paymentId = earlier.value;
+  const created = !paymentId;
+  if (!paymentId) {
+    if (customer.status === 'rejected') throw customer.reason;
+    paymentId = await createSavedPayment(customer.value, token, charge);
+  }
   try {
-    await finalizeSavedPayment(paymentId, charge);
+    await finalizeSavedPayment(paymentId, charge, created);
   } catch (error) {
     // Money may be on hold or taken: name the payment so support can find it
     const message = `Saved card payment ${paymentId} was not finalized: ${messageOf(error)}`;
