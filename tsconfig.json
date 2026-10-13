@@ -15,6 +15,7 @@
     "node_modules",
     "frontend",
     "test",
-    "vitest.config.ts"
+    "vitest.config.ts",
+    "components"
   ]
 }

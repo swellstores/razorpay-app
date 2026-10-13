@@ -23,7 +23,7 @@ Settings are in `settings/card.json`:
 - `key_id` is public and is used by the checkout component.
 - `key_secret` is used only by functions.
 
-The checkout component (`components/Razorpay.tsx`, added in a later change) renders in the hosted checkout's payment method body through `@swell/apps-sdk`, on the `card` extension and the `checkout.payment.methods` target.
+The checkout component (`components/Razorpay.tsx`) renders in the hosted checkout's payment method body through `@swell/apps-sdk`, on the `card` extension and the `checkout.payment.methods` target.
 
 ## Merchant setup
 

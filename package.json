@@ -3,16 +3,20 @@
   "devDependencies": {
     "@swell/app-types": "^1.2.0",
     "typescript": "^5.9.3",
-    "vitest": "3.2.7"
+    "vitest": "3.2.7",
+    "@swell/apps-sdk": "^2.0.0-alpha.7"
   },
   "name": "razorpay",
   "private": true,
   "scripts": {
-    "typecheck": "([ -z \"$(find functions -name '*.ts' 2>/dev/null | head -1)\" ] || tsc --noEmit) && ([ ! -f test/tsconfig.json ] || tsc --build --noEmit test) && ([ ! -f frontend/tsconfig.json ] || tsc --build --noEmit frontend)",
+    "typecheck": "([ -z \"$(find functions -name '*.ts' 2>/dev/null | head -1)\" ] || tsc --noEmit) && ([ ! -f test/tsconfig.json ] || tsc --build --noEmit test) && ([ ! -f frontend/tsconfig.json ] || tsc --build --noEmit frontend) && ([ ! -f components/tsconfig.json ] || tsc --noEmit -p components)",
     "test": "vitest run"
   },
   "version": "1.0.0",
   "workspaces": [
     "frontend"
-  ]
+  ],
+  "dependencies": {
+    "preact": "^10.28.0"
+  }
 }
