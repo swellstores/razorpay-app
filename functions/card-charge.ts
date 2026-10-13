@@ -117,9 +117,10 @@ async function chargeShopperPayment(paymentId: string, charge: Charge): Promise<
 }
 
 /**
- * Brings a new saved card payment to the phase's status. Razorpay answers `authorized` right after
- * create/recurring, so the capture is explicit; it may also have captured it already. It was bound at
- * creation and created here, so no owner checks: its notes may be absent.
+ * Brings a saved card payment to the phase's status. Razorpay answers `authorized` right after
+ * create/recurring, so the capture is explicit; it may also have captured it already. It was created here
+ * for this Swell payment, now or in an earlier attempt found by its order receipt, so no owner checks:
+ * its notes may be absent.
  */
 async function finalizeSavedPayment(paymentId: string, charge: Charge): Promise<void> {
   const { razorpay } = charge;
@@ -136,17 +137,36 @@ async function finalizeSavedPayment(paymentId: string, charge: Charge): Promise<
   }
 }
 
-/** Charges the saved card token with a new payment, bound to this Swell payment at creation */
-async function chargeSavedCard(req: SwellRequest, token: string, charge: Charge): Promise<string> {
-  const { razorpay, amount, currency } = charge;
-  const accountId = req.data.account_id;
-  if (!accountId) {
-    throw new Error('No account for this charge');
+/**
+ * The saved card payment an earlier attempt of this Swell payment created, found by its order receipt:
+ * after a lost answer, a retry finalizes it rather than charging the card again. A captured one comes
+ * first, so it is never captured twice; created and failed payments took nothing. One it captured that
+ * does not match the order fails, as its money was taken.
+ */
+async function findSavedPayment(charge: Charge): Promise<string | undefined> {
+  const { razorpay, swellPaymentId } = charge;
+  const orders = await razorpay.findOrdersByReceipt(swellPaymentId);
+  let authorized: string | undefined;
+  for (const order of orders.filter((order) => order.receipt === swellPaymentId)) {
+    for (const payment of await razorpay.getOrderPayments(order.id)) {
+      if (payment.status !== 'authorized' && payment.status !== 'captured') continue;
+      const mismatch = mismatchOf(payment, charge);
+      if (payment.status === 'captured') {
+        if (mismatch) throw new Error(mismatch);
+        return payment.id;
+      }
+      if (!mismatch) authorized ??= payment.id;
+    }
   }
-  // The Razorpay customer the card was saved for
-  const customer = await customerOf(req, razorpay, accountId, 'charge the saved card');
-  const notes = { swell_payment_id: charge.swellPaymentId };
-  const order = await razorpay.createOrder({ amount, currency, payment_capture: false, notes });
+  return authorized;
+}
+
+/** Charges the saved card token with a new payment, bound to this Swell payment at creation */
+async function createSavedPayment(customer: { id: string; email: string; contact: string }, token: string, charge: Charge): Promise<string> {
+  const { razorpay, swellPaymentId, amount, currency } = charge;
+  const notes = { swell_payment_id: swellPaymentId };
+  // The receipt finds this order again on a retry (Swell payment ids are 24 characters, Razorpay takes 40)
+  const order = await razorpay.createOrder({ amount, currency, payment_capture: false, receipt: swellPaymentId, notes });
   const { razorpay_payment_id: paymentId } = await razorpay.createRecurringPayment({
     email: customer.email,
     contact: customer.contact,
@@ -158,6 +178,19 @@ async function chargeSavedCard(req: SwellRequest, token: string, charge: Charge)
     recurring: '1',
     notes,
   });
+  return paymentId;
+}
+
+/** Finalizes the saved card payment of an earlier attempt, or of a new charge of the token */
+async function chargeSavedCard(req: SwellRequest, token: string, charge: Charge): Promise<string> {
+  const accountId = req.data.account_id;
+  if (!accountId) {
+    throw new Error('No account for this charge');
+  }
+  // The Razorpay customer the card was saved for
+  const customer = await customerOf(req, charge.razorpay, accountId, 'charge the saved card');
+  // A failed lookup fails the charge: a new payment is created only when no earlier one took the money
+  const paymentId = (await findSavedPayment(charge)) ?? (await createSavedPayment(customer, token, charge));
   try {
     await finalizeSavedPayment(paymentId, charge);
   } catch (error) {

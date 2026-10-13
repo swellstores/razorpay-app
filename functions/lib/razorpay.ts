@@ -25,6 +25,13 @@ export class RazorpayError extends Error {
   }
 }
 
+export interface RazorpayOrder {
+  id: string;
+  amount: number;
+  currency: string;
+  receipt?: string;
+}
+
 const SIGNATURE = /^[0-9a-f]{64}$/i;
 
 function hexToBytes(hex: string): Uint8Array<ArrayBuffer> {
@@ -56,8 +63,26 @@ export default class Razorpay {
     return data as T;
   }
 
+  /** The items of a collection; an answer without them fails, so that it never reads as an empty list */
+  async #list<T>(path: string): Promise<T[]> {
+    const { items } = await this.#request<{ items?: T[] }>(path);
+    if (!Array.isArray(items)) {
+      throw new Error('Razorpay did not return a list');
+    }
+    return items;
+  }
+
   createOrder(data: Record<string, unknown>) {
-    return this.#request<{ id: string; amount: number; currency: string }>('/orders', 'POST', data);
+    return this.#request<RazorpayOrder>('/orders', 'POST', data);
+  }
+
+  /** Up to 100 orders created with this receipt */
+  findOrdersByReceipt(receipt: string) {
+    return this.#list<RazorpayOrder>(`/orders?receipt=${encodeURIComponent(receipt)}&count=100`);
+  }
+
+  getOrderPayments(orderId: string) {
+    return this.#list<RazorpayPayment>(`/orders/${encodeURIComponent(orderId)}/payments`);
   }
 
   async createCustomer(data: Record<string, unknown>): Promise<{ id: string }> {
