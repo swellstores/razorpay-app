@@ -1,6 +1,7 @@
 import { toSubunits } from '../lib/amount';
 import type Razorpay from './lib/razorpay';
 import type { RazorpayPayment } from './lib/razorpay';
+import { contactOf } from './lib/customer';
 import { getRazorpay } from './lib/settings';
 
 export const config: SwellConfig = {
@@ -27,6 +28,10 @@ interface Charge {
 /** A transaction id when the charge is done, otherwise why the shopper's payment could not finish it */
 type Outcome = { transactionId: string } | { reason: string };
 
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 function notesOf(payment: RazorpayPayment): Record<string, string> {
   return Array.isArray(payment.notes) ? {} : (payment.notes ?? {});
 }
@@ -48,12 +53,17 @@ function mismatchOf(payment: RazorpayPayment, { amount, currency }: Charge): str
 /**
  * What a Razorpay payment is to this charge: 'captured' by this Swell payment, an 'authorized' payment
  * it may use, or the reason it may not. A captured payment that no Swell payment recorded may be this
- * one's own capture whose record was lost, so it fails closed rather than charging again.
+ * one's own capture whose record was lost, so it fails closed rather than charging again; so does one
+ * this Swell payment captured that does not match the order, since its money was already taken.
  */
 function standingOf(payment: RazorpayPayment, charge: Charge): 'captured' | 'authorized' | { reason: string } {
   const owner = ownerOf(payment);
   if (payment.status === 'captured') {
-    if (owner === charge.swellPaymentId) return 'captured';
+    if (owner === charge.swellPaymentId) {
+      const mismatch = mismatchOf(payment, charge);
+      if (mismatch) throw new Error(mismatch);
+      return 'captured';
+    }
     if (!owner) throw new Error(FAIL_CLOSED);
     return { reason: 'Payment belongs to another order' };
   }
@@ -75,7 +85,8 @@ async function captureAndClaim(payment: RazorpayPayment, charge: Charge): Promis
   } catch (error) {
     const standing = standingOf(await razorpay.getPayment(payment.id), charge);
     if (standing === 'captured') return { transactionId: payment.id };
-    return { reason: error instanceof Error ? error.message : String(error) };
+    // Still authorized too: a failed capture cancels the order, so a fresh charge of the saved card is preferred
+    return { reason: messageOf(error) };
   }
   if (ownerOf(payment) !== swellPaymentId) {
     try {
@@ -108,7 +119,7 @@ async function customerOf(req: SwellRequest, razorpay: Razorpay) {
   if (!email) {
     throw new Error('An email address is required to charge the saved card');
   }
-  const contact = account.phone || account.billing?.phone || req.data.billing?.phone || account.shipping?.phone;
+  const contact = contactOf(account);
   if (!contact) {
     throw new Error('A phone number is required to charge the saved card');
   }
@@ -117,12 +128,32 @@ async function customerOf(req: SwellRequest, razorpay: Razorpay) {
   return { id: customer.id, email, contact };
 }
 
+/**
+ * Brings a new saved card payment to the phase's status. Razorpay answers `authorized` right after
+ * create/recurring, so the capture is explicit; it may also have captured it already. It was bound at
+ * creation and created here, so no owner checks: its notes may be absent.
+ */
+async function finalizeSavedPayment(paymentId: string, charge: Charge): Promise<void> {
+  const { razorpay } = charge;
+  const { status } = await razorpay.getPayment(paymentId);
+  if (status === 'captured') return;
+  if (status !== 'authorized') {
+    throw new Error(`Payment is not authorized (status: ${status})`);
+  }
+  if (!charge.capture) return;
+  try {
+    await razorpay.capturePayment(paymentId, charge.amount, charge.currency);
+  } catch (error) {
+    if ((await razorpay.getPayment(paymentId)).status !== 'captured') throw error;
+  }
+}
+
 /** Charges the saved card token with a new payment, bound to this Swell payment at creation */
 async function chargeSavedCard(req: SwellRequest, token: string, charge: Charge): Promise<string> {
   const { razorpay, amount, currency } = charge;
   const customer = await customerOf(req, razorpay);
   const notes = { swell_payment_id: charge.swellPaymentId };
-  const order = await razorpay.createOrder({ amount, currency, payment_capture: charge.capture, notes });
+  const order = await razorpay.createOrder({ amount, currency, payment_capture: false, notes });
   const { razorpay_payment_id: paymentId } = await razorpay.createRecurringPayment({
     email: customer.email,
     contact: customer.contact,
@@ -134,12 +165,15 @@ async function chargeSavedCard(req: SwellRequest, token: string, charge: Charge)
     recurring: '1',
     notes,
   });
-  const payment = await razorpay.getPayment(paymentId);
-  const expected = charge.capture ? 'captured' : 'authorized';
-  if (payment.status !== expected) {
-    throw new Error(`Saved card payment ${payment.id} is not ${expected} (status: ${payment.status})`);
+  try {
+    await finalizeSavedPayment(paymentId, charge);
+  } catch (error) {
+    // Money may be on hold or taken: name the payment so support can find it
+    const message = `Saved card payment ${paymentId} was not finalized: ${messageOf(error)}`;
+    console.error(message, `(Swell payment ${charge.swellPaymentId})`);
+    throw new Error(message);
   }
-  return payment.id;
+  return paymentId;
 }
 
 export default async function (req: SwellRequest) {
@@ -174,6 +208,6 @@ export default async function (req: SwellRequest) {
     }
     return { success: true, transaction_id: await chargeSavedCard(req, token, charge) };
   } catch (error) {
-    return { success: false, error: { message: error instanceof Error ? error.message : String(error) } };
+    return { success: false, error: { message: messageOf(error) } };
   }
 }

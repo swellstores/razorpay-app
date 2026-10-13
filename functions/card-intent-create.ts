@@ -1,3 +1,4 @@
+import { contactOf } from './lib/customer';
 import { getRazorpay } from './lib/settings';
 
 export const config: SwellConfig = {
@@ -22,12 +23,16 @@ export default async function (req: SwellRequest) {
     if (!email) {
       throw new Error('An email address is required to save the card');
     }
+    const contact = contactOf(account);
+    if (!contact) {
+      throw new Error('A phone number is required to save the card');
+    }
 
     const razorpay = await getRazorpay(req);
     const customer = await razorpay.createCustomer({
       name: account.name,
       email,
-      contact: account.phone || account.billing?.phone || account.shipping?.phone,
+      contact,
       fail_existing: '0', // Returns the existing customer when the same details were saved before
     });
     // Built from the amount and currency only: the rest of the intent comes from the browser

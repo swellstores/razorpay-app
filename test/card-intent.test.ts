@@ -69,6 +69,17 @@ describe('payment.create_intent', () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
+  it('fails clearly when the shopper has no phone number, before calling Razorpay', async () => {
+    const fetch = vi.fn();
+    vi.stubGlobal('fetch', fetch);
+    for (const shopper of [{ name: 'A', email: 'a@b.c' }, { name: 'A', email: 'a@b.c', phone: '', billing: {}, shipping: {} }]) {
+      expect(await createIntent(request({ account: shopper, intent: { amount: 1050, currency: 'INR' } }))).toEqual({
+        error: 'A phone number is required to save the card',
+      });
+    }
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it('rejects an intent without a positive whole amount', async () => {
     const fetch = vi.fn();
     vi.stubGlobal('fetch', fetch);
