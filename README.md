@@ -6,7 +6,7 @@ Razorpay app for Swell. It is the gateway behind Swell's native card payment met
 
 Payments are two-phase:
 
-1. **Authorize.** The checkout component opens the Razorpay modal. Razorpay creates an order with manual capture (2 hour expiry), and the shopper authorizes the card in the modal. The app verifies the payment signature.
+1. **Authorize.** The app creates a Razorpay order with manual capture (`payment.create_intent`), and the checkout component opens the Razorpay modal for it. The shopper authorizes the card in the modal; after a failed attempt the modal stays open so the shopper can retry. The app verifies the payment signature. Razorpay releases an authorization that is not captured within 60 minutes (`manual_expiry_period: 60`); Swell captures right after authorizing.
 2. **Capture.** Swell calls `payment.charge` twice for the order. The first call (`captured: false`) checks that the payment is an authorized card payment whose amount and currency match the order, and binds it to the Swell payment by writing `notes.swell_payment_id` on the Razorpay payment. The second call (`captured: true`) repeats the checks and captures it.
 
 The browser chooses which Razorpay payment the checkout saves, so the charge is the trusted check. A Razorpay payment bound to another Swell payment is refused, and an already captured payment is accepted only for the Swell payment it is bound to (a retry).
@@ -33,6 +33,17 @@ The checkout component (`components/Razorpay.tsx`) renders in the hosted checkou
 2. In Swell, go to Settings → Payments → Card and choose Razorpay as the gateway.
 3. Enter the Key ID and Key secret from the Razorpay Dashboard (Account & Settings → API Keys).
 4. Click Save. The card extension only activates after you save.
+
+## Installing
+
+`@swell/apps-sdk` 2.0.0-alpha.7 is not published to npm yet. Until it is, install it from the SDK tarball:
+
+```sh
+npm install
+npm install --no-save <path to swell-apps-sdk-2.0.0-alpha.7.tgz>
+```
+
+`package-lock.json` does not list the SDK yet. It is regenerated after the SDK is published.
 
 ## Testing
 

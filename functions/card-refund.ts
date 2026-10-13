@@ -11,6 +11,13 @@ export default async function (req: SwellRequest) {
   const { amount, currency, transaction_id: paymentId } = req.data;
 
   try {
+    if (!paymentId) {
+      throw new Error('No Razorpay payment to refund');
+    }
+    if (typeof amount !== 'number' || !(amount > 0)) {
+      throw new Error('Refund amount must be greater than zero');
+    }
+
     const razorpay = await getRazorpay(req);
     const refund = await razorpay.refundPayment(paymentId, toSubunits(amount, currency));
     return { success: true, transaction_id: refund.id };

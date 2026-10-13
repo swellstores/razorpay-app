@@ -24,17 +24,24 @@ type RazorpayConstructor = new (options: Record<string, unknown>) => {
   open(): void;
 };
 
-/** Loads checkout.js once in the frame's document */
+let loading: Promise<RazorpayConstructor> | undefined;
+
+/** Loads checkout.js once in the frame's document; a failed load can be retried */
 export function loadRazorpay(): Promise<RazorpayConstructor> {
   const existing = (window as unknown as { Razorpay?: RazorpayConstructor }).Razorpay;
   if (existing) return Promise.resolve(existing);
-  return new Promise((resolve, reject) => {
+  loading ??= new Promise<RazorpayConstructor>((resolve, reject) => {
     const script = document.createElement('script');
     script.src = CHECKOUT_SCRIPT;
     script.onload = () => resolve((window as unknown as { Razorpay: RazorpayConstructor }).Razorpay);
-    script.onerror = () => reject(new Error('Razorpay checkout could not be loaded'));
+    script.onerror = () => {
+      loading = undefined;
+      script.remove();
+      reject(new Error('Razorpay checkout could not be loaded'));
+    };
     document.head.appendChild(script);
   });
+  return loading;
 }
 
 /**

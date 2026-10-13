@@ -19,11 +19,29 @@ describe('payment.create_intent', () => {
     expect(await createIntent(request({ intent: { amount: 1050, currency: 'INR' } }))).toEqual({
       result: { order: { id: 'order_1', amount: 1050, currency: 'INR' } },
     });
-    expect(bodies[0]).toEqual({ amount: 1050, currency: 'INR', payment: { capture: 'manual', capture_options: { manual_expiry_period: 7200, refund_speed: 'normal' } } });
+    expect(bodies[0]).toEqual({ amount: 1050, currency: 'INR', payment: { capture: 'manual', capture_options: { manual_expiry_period: 60, refund_speed: 'normal' } } });
   });
 
   it('rejects an intent without a positive whole amount', async () => {
     expect(await createIntent(request({ intent: { amount: 10.5, currency: 'INR' } }))).toEqual({ error: 'Invalid amount' });
+  });
+
+  it('sends the currency in upper case', async () => {
+    const bodies: any[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init: RequestInit) => {
+      bodies.push(JSON.parse(String(init.body)));
+      return Response.json({ id: 'order_1', amount: 1050, currency: 'INR' });
+    }));
+    await createIntent(request({ intent: { amount: 1050, currency: 'inr' } }));
+    expect(bodies[0].currency).toBe('INR');
+  });
+
+  it('rejects an intent without a currency, before calling Razorpay', async () => {
+    const fetch = vi.fn();
+    vi.stubGlobal('fetch', fetch);
+    expect(await createIntent(request({ intent: { amount: 1050, currency: '' } }))).toEqual({ error: 'Invalid currency' });
+    expect(await createIntent(request({ intent: { amount: 1050 } }))).toEqual({ error: 'Invalid currency' });
+    expect(fetch).not.toHaveBeenCalled();
   });
 });
 
@@ -39,10 +57,15 @@ describe('payment.get_intent', () => {
     });
   });
 
-  it('refuses a wrong signature', async () => {
+  it.each([
+    ['a short string', 'forged'],
+    ['64 characters that are not hex', 'z'.repeat(64)],
+    ['the signature of another payment', createHmac('sha256', 'secret').update('order_1|pay_2').digest('hex')],
+    ['the right signature with an extra character', `${signature}0`],
+  ])('refuses %s as the signature', async (_name, forged) => {
     const fetch = vi.fn();
     vi.stubGlobal('fetch', fetch);
-    expect(await getIntent(request({ intent: { razorpay_order_id: 'order_1', razorpay_payment_id: 'pay_1', razorpay_signature: 'forged' } }))).toEqual({
+    expect(await getIntent(request({ intent: { razorpay_order_id: 'order_1', razorpay_payment_id: 'pay_1', razorpay_signature: forged } }))).toEqual({
       error: 'Invalid payment signature',
     });
     expect(fetch).not.toHaveBeenCalled();

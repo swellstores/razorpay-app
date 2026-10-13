@@ -12,11 +12,10 @@ export interface RazorpayPayment {
   card?: { last4?: string; network?: string; type?: string };
 }
 
-async function hmacSha256(message: string, secret: string): Promise<string> {
-  const encoder = new TextEncoder();
-  const key = await crypto.subtle.importKey('raw', encoder.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
-  const signature = await crypto.subtle.sign('HMAC', key, encoder.encode(message));
-  return Array.from(new Uint8Array(signature), (byte) => byte.toString(16).padStart(2, '0')).join('');
+const SIGNATURE = /^[0-9a-f]{64}$/i;
+
+function hexToBytes(hex: string): Uint8Array<ArrayBuffer> {
+  return Uint8Array.from(hex.match(/../g) ?? [], (byte) => parseInt(byte, 16));
 }
 
 export default class Razorpay {
@@ -64,7 +63,11 @@ export default class Razorpay {
     return this.#request<{ id: string }>(`/payments/${encodeURIComponent(id)}/refund`, 'POST', { amount });
   }
 
+  /** Checks the modal's HMAC-SHA256 hex signature of `order_id|payment_id` in constant time */
   async verifySignature(orderId: string, paymentId: string, signature: string): Promise<boolean> {
-    return (await hmacSha256(`${orderId}|${paymentId}`, this.#secret)) === signature;
+    if (typeof signature !== 'string' || !SIGNATURE.test(signature)) return false;
+    const encoder = new TextEncoder();
+    const key = await crypto.subtle.importKey('raw', encoder.encode(this.#secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['verify']);
+    return crypto.subtle.verify('HMAC', key, hexToBytes(signature), encoder.encode(`${orderId}|${paymentId}`));
   }
 }

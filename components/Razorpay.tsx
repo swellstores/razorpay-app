@@ -28,14 +28,13 @@ export default function Razorpay({ context, settings, on, call }: ComponentProps
     void loadRazorpay().catch(() => {});
     return on('submit', async (): Promise<PaymentSubmitResult> => {
       if (!keyId) throw new Error('Razorpay is not configured');
+      // Load the modal first, so a failed load leaves no Razorpay order behind
+      const RazorpayCheckout = await loadRazorpay();
       const { cart } = latest.current;
-      const [RazorpayCheckout, { order }] = await Promise.all([
-        loadRazorpay(),
-        call<{ order: RazorpayOrder }>('createIntent', {
-          amount: toSubunits(cart.capture_total, cart.currency),
-          currency: cart.currency,
-        }),
-      ]);
+      const { order } = await call<{ order: RazorpayOrder }>('createIntent', {
+        amount: toSubunits(cart.capture_total, cart.currency),
+        currency: cart.currency,
+      });
       const response = await openRazorpay(RazorpayCheckout, {
         keyId,
         order,

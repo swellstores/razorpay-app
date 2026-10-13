@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { openRazorpay, toBilling } from '../components/lib/checkout';
 
@@ -47,6 +47,57 @@ describe('openRazorpay', () => {
     FakeRazorpay.last.handlers['payment.failed']({ error: { description: 'Card declined' } });
     FakeRazorpay.last.options.modal.ondismiss();
     await expect(pending).rejects.toThrow('Card declined');
+  });
+});
+
+describe('loadRazorpay', () => {
+  // A minimal document: the loader only creates, appends and removes <script> elements
+  function fakeDocument() {
+    const scripts: { src?: string; onload?: () => void; onerror?: () => void; remove(): void }[] = [];
+    vi.stubGlobal('window', {});
+    vi.stubGlobal('document', {
+      createElement: () => {
+        const script = { remove: () => scripts.splice(scripts.indexOf(script), 1) } as (typeof scripts)[number];
+        return script;
+      },
+      head: { appendChild: (script: (typeof scripts)[number]) => scripts.push(script) },
+    });
+    return scripts;
+  }
+
+  // A fresh module per test, since the loader caches its pending load
+  async function importLoader() {
+    vi.resetModules();
+    return (await import('../components/lib/checkout')).loadRazorpay;
+  }
+
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('adds checkout.js once while a load is pending', async () => {
+    const scripts = fakeDocument();
+    const loadRazorpay = await importLoader();
+    const first = loadRazorpay();
+    const second = loadRazorpay();
+    expect(scripts.map((script) => script.src)).toEqual(['https://checkout.razorpay.com/v1/checkout.js']);
+    (window as any).Razorpay = FakeRazorpay;
+    scripts[0].onload?.();
+    expect(await first).toBe(FakeRazorpay);
+    expect(await second).toBe(FakeRazorpay);
+  });
+
+  it('removes a script that failed to load and loads again on the next call', async () => {
+    const scripts = fakeDocument();
+    const loadRazorpay = await importLoader();
+    const failed = loadRazorpay();
+    scripts[0].onerror?.();
+    await expect(failed).rejects.toThrow('Razorpay checkout could not be loaded');
+    expect(scripts.length).toBe(0);
+
+    const retry = loadRazorpay();
+    expect(scripts.length).toBe(1);
+    (window as any).Razorpay = FakeRazorpay;
+    scripts[0].onload?.();
+    expect(await retry).toBe(FakeRazorpay);
   });
 });
 
