@@ -127,24 +127,18 @@ async function chargeShopperPayment(paymentId: string, charge: Charge): Promise<
  * for this Swell payment, now or in an earlier attempt found by its order receipt, so no owner checks:
  * its notes may be absent.
  */
-async function finalizeSavedPayment(paymentId: string, charge: Charge, created: boolean): Promise<void> {
+async function finalizeSavedPayment(paymentId: string, charge: Charge): Promise<void> {
   const { razorpay } = charge;
-  // A payment created just now is captured straight away: one Razorpay call less, as the platform gives
-  // the whole charge 10 seconds. The capture answers for its status; a failed one is read back below.
-  if (!(created && charge.capture)) {
-    const { status } = await razorpay.getPayment(paymentId);
-    if (status === 'captured') return;
-    if (status !== 'authorized') {
-      throw new Error(`Payment is not authorized (status: ${status})`);
-    }
-    if (!charge.capture) return;
+  const { status } = await razorpay.getPayment(paymentId);
+  if (status === 'captured') return;
+  if (status !== 'authorized') {
+    throw new Error(`Payment is not authorized (status: ${status})`);
   }
+  if (!charge.capture) return;
   try {
     await razorpay.capturePayment(paymentId, charge.amount, charge.currency);
   } catch (error) {
-    const { status } = await razorpay.getPayment(paymentId);
-    if (status === 'captured') return;
-    throw status === 'authorized' ? error : new Error(`Payment is not authorized (status: ${status})`);
+    if ((await razorpay.getPayment(paymentId)).status !== 'captured') throw error;
   }
 }
 
@@ -176,55 +170,92 @@ async function findSavedPayment(charge: Charge): Promise<string | undefined> {
   return authorized;
 }
 
-/** Charges the saved card token with a new payment, bound to this Swell payment at creation */
-async function createSavedPayment(customer: { id: string; email: string; contact: string }, token: string, charge: Charge): Promise<string> {
+type Customer = { id: string; email: string; contact: string };
+
+/**
+ * Charges the saved card token with a new payment on `orderId`, bound to this Swell payment at creation.
+ * Razorpay answers a successful one with the order's signature, so it is not read back; without a valid
+ * signature it is read, and must be authorized or captured.
+ */
+async function createSavedPayment(customer: Customer, token: string, orderId: string, charge: Charge): Promise<string> {
   const { razorpay, swellPaymentId, amount, currency } = charge;
-  const notes = { swell_payment_id: swellPaymentId };
-  // The receipt finds this order again on a retry (Swell payment ids are 24 characters, Razorpay takes 40)
-  const order = await razorpay.createOrder({ amount, currency, payment_capture: false, receipt: swellPaymentId, notes });
-  const { razorpay_payment_id: paymentId } = await razorpay.createRecurringPayment({
+  const answer = await razorpay.createRecurringPayment({
     email: customer.email,
     contact: customer.contact,
     amount,
     currency,
-    order_id: order.id,
+    order_id: orderId,
     customer_id: customer.id,
     token,
     recurring: '1',
-    notes,
+    notes: { swell_payment_id: swellPaymentId },
   });
+  const paymentId = answer.razorpay_payment_id;
+  try {
+    if (!(await razorpay.verifySignature(orderId, paymentId, answer.razorpay_signature ?? ''))) {
+      const { status } = await razorpay.getPayment(paymentId);
+      if (status !== 'authorized' && status !== 'captured') {
+        throw new Error(`Payment is not authorized (status: ${status})`);
+      }
+    }
+  } catch (error) {
+    throw new SavedPaymentError(paymentId, error);
+  }
   return paymentId;
 }
 
-/** Finalizes the saved card payment of an earlier attempt, or of a new charge of the token */
+/** A saved card payment exists but did not finish: money may be on hold or taken, so it names the payment */
+class SavedPaymentError extends Error {
+  constructor(paymentId: string, cause: unknown) {
+    super(`Saved card payment ${paymentId} was not finalized: ${messageOf(cause)}`);
+  }
+}
+
+/**
+ * Charges the saved card. The platform gives the whole charge 10 seconds and each Razorpay call takes
+ * about 2, so everything that can runs in parallel: the customer, the payment of an earlier attempt and
+ * the order for a new one. A new payment is never captured separately: when Swell asks for the capture
+ * its order captures it (`payment_capture`), and the payment counts once it is authorized.
+ */
 async function chargeSavedCard(req: SwellRequest, token: string, charge: Charge): Promise<string> {
+  const { razorpay, swellPaymentId, amount, currency } = charge;
   const accountId = req.data.account_id;
   if (!accountId) {
     throw new Error('No account for this charge');
   }
-  // In parallel, to stay within the platform's 10 seconds: the Razorpay customer the card was saved for,
-  // needed only for a new payment, and the payment of an earlier attempt
-  const [customer, earlier] = await Promise.allSettled([
-    customerOf(req, charge.razorpay, accountId, 'charge the saved card'),
+  const [customer, earlier, order] = await Promise.allSettled([
+    customerOf(req, razorpay, accountId, 'charge the saved card'),
     findSavedPayment(charge),
+    // The receipt finds this order again on a retry (Swell payment ids are 24 characters, Razorpay takes 40);
+    // an order left unused when an earlier attempt is found expires on its own
+    razorpay.createOrder({
+      amount,
+      currency,
+      payment_capture: charge.capture,
+      receipt: swellPaymentId,
+      notes: { swell_payment_id: swellPaymentId },
+    }),
   ]);
-  // A failed lookup fails the charge: a new payment is created only when no earlier one took the money
-  if (earlier.status === 'rejected') throw earlier.reason;
-  let paymentId = earlier.value;
-  const created = !paymentId;
-  if (!paymentId) {
-    if (customer.status === 'rejected') throw customer.reason;
-    paymentId = await createSavedPayment(customer.value, token, charge);
-  }
   try {
-    await finalizeSavedPayment(paymentId, charge, created);
+    // A failed lookup fails the charge: a new payment is created only when no earlier one took the money
+    if (earlier.status === 'rejected') throw earlier.reason;
+    if (earlier.value) {
+      try {
+        await finalizeSavedPayment(earlier.value, charge);
+      } catch (error) {
+        throw new SavedPaymentError(earlier.value, error);
+      }
+      return earlier.value;
+    }
+    if (customer.status === 'rejected') throw customer.reason;
+    if (order.status === 'rejected') throw order.reason;
+    return await createSavedPayment(customer.value, token, order.value.id, charge);
   } catch (error) {
-    // Money may be on hold or taken: name the payment so support can find it
-    const message = `Saved card payment ${paymentId} was not finalized: ${messageOf(error)}`;
-    console.error(message, `(Swell payment ${charge.swellPaymentId})`);
-    throw new Error(message);
+    if (error instanceof SavedPaymentError) {
+      console.error(error.message, `(Swell payment ${swellPaymentId})`);
+    }
+    throw error;
   }
-  return paymentId;
 }
 
 export default async function (req: SwellRequest) {

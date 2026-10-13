@@ -99,7 +99,11 @@ export default class Razorpay {
 
   /** Charges a saved card token without the shopper present */
   createRecurringPayment(data: Record<string, unknown>) {
-    return this.#request<{ razorpay_payment_id: string }>('/payments/create/recurring', 'POST', data);
+    return this.#request<{ razorpay_payment_id: string; razorpay_order_id?: string; razorpay_signature?: string }>(
+      '/payments/create/recurring',
+      'POST',
+      data,
+    );
   }
 
   updatePayment(id: string, data: { notes: Record<string, string> }) {
