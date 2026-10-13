@@ -7,6 +7,8 @@ export interface RazorpayPayment {
   currency: string;
   order_id?: string;
   method?: string;
+  /** Razorpay returns empty notes as an empty array */
+  notes?: Record<string, string> | [];
   card?: { last4?: string; network?: string; type?: string };
 }
 
@@ -48,6 +50,10 @@ export default class Razorpay {
 
   getPayment(id: string, expandCard = false) {
     return this.#request<RazorpayPayment>(`/payments/${encodeURIComponent(id)}${expandCard ? '?expand[]=card' : ''}`);
+  }
+
+  updatePayment(id: string, data: { notes: Record<string, string> }) {
+    return this.#request<RazorpayPayment>(`/payments/${encodeURIComponent(id)}`, 'PATCH', data);
   }
 
   capturePayment(id: string, amount: number, currency: string) {

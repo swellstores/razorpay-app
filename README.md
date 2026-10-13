@@ -7,7 +7,9 @@ Razorpay app for Swell. It is the gateway behind Swell's native card payment met
 Payments are two-phase:
 
 1. **Authorize.** The checkout component opens the Razorpay modal. Razorpay creates an order with manual capture (2 hour expiry), and the shopper authorizes the card in the modal. The app verifies the payment signature.
-2. **Capture.** Swell calls `payment.charge` twice for the order. The first call (`captured: false`) checks that the payment is authorized and its amount matches the order. The second call (`captured: true`) captures it.
+2. **Capture.** Swell calls `payment.charge` twice for the order. The first call (`captured: false`) checks that the payment is an authorized card payment whose amount and currency match the order, and binds it to the Swell payment by writing `notes.swell_payment_id` on the Razorpay payment. The second call (`captured: true`) repeats the checks and captures it.
+
+The browser chooses which Razorpay payment the checkout saves, so the charge is the trusted check. A Razorpay payment bound to another Swell payment is refused, and an already captured payment is accepted only for the Swell payment it is bound to (a retry).
 
 Refunds go through `payment.refund`.
 
