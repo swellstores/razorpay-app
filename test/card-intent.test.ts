@@ -124,6 +124,12 @@ describe('payment.create_intent', () => {
     expect(req.swell.put).toHaveBeenCalledWith('/accounts/acc_1', { $app: { razorpay: { customer_id: 'cust_1', contact: '+919999999999' } } });
   });
 
+  it('takes a checkout phone the vault turned into a number', async () => {
+    const calls = stubRazorpay();
+    await createIntent(request({ intent: { amount: 1050, currency: 'INR', contact: 2198369784 } }, { name: 'A', email: 'a@b.c' }));
+    expect(calls[0].body.contact).toBe('2198369784');
+  });
+
   it("prefers the account's phone to the checkout's", async () => {
     const calls = stubRazorpay();
     await createIntent(request({ intent: { amount: 1050, currency: 'INR', contact: '+919999999999' } }));

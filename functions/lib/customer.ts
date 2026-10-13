@@ -13,6 +13,11 @@ function trimmed(value: unknown): string | undefined {
   return (typeof value === 'string' && value.trim()) || undefined;
 }
 
+/** A phone from the browser: the vault turns a numeric query value such as `2198369784` into a number */
+function phoneOf(value: unknown): string | undefined {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? String(value) : trimmed(value);
+}
+
 /** The phone stored on the Swell account */
 export function contactOf(account: Account): string | undefined {
   return trimmed(account.phone) || trimmed(account.billing?.phone) || trimmed(account.shipping?.phone);
@@ -49,7 +54,7 @@ export async function customerOf(
   if (kept) {
     return { ...kept, email };
   }
-  const contact = contactOf(account) || trimmed(fallbackContact);
+  const contact = contactOf(account) || phoneOf(fallbackContact);
   if (!contact) {
     throw new Error(`A phone number is required to ${purpose}`);
   }
