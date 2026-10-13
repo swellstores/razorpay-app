@@ -37,43 +37,79 @@ function request(record: Record<string, unknown> = { captured: true }) {
 }
 
 const DEFAULT_RETRIES = 5;
+/** The engine stopped the run at a sleep; it runs it again later, replaying the steps it recorded */
+class Evicted extends Error {}
+
+type Recorded = { result: unknown } | { error: string };
 
 /**
- * A fake step runner, as the platform runs steps: a step runs its function and keeps a JSON copy of the
+ * A fake step runner, as the platform runs steps. A step is keyed by its name plus a per-name counter, so
+ * the same name twice in a run is two steps. A step runs its function and records a JSON copy of the
  * result; it retries a failure up to its `retries.limit` (5 by default), then fails with the message only
- * (the error's class and status do not survive). Step names must be unique, since a repeated name would
- * return the first result. `sleep` records and calls `onSleep`.
+ * (the error's class and status do not survive), and records that too. A step already in `cache` (from an
+ * earlier run of the same instance) is not run again: it returns or throws what was recorded. A sleep is
+ * recorded the same way; `evictAt` stops the run at that sleep, as the engine does when it unloads a
+ * sleeping run. `onSleep` and `afterStep` let a test change the world in between.
  */
-function fakeStep(onSleep: (name: string) => void = () => undefined) {
+function fakeStep(
+  options:
+    | ((name: string) => void)
+    | {
+        onSleep?: (name: string) => void;
+        afterStep?: (name: string) => void;
+        cache?: Map<string, Recorded>;
+        evictAt?: string;
+      } = {},
+) {
+  const { onSleep = () => undefined, afterStep = () => undefined, cache = new Map<string, Recorded>(), evictAt } =
+    typeof options === 'function' ? { onSleep: options } : options;
   const log: string[] = [];
-  const names = new Set<string>();
+  const counts = new Map<string, number>();
+  const keyOf = (name: string) => {
+    const count = (counts.get(name) ?? 0) + 1;
+    counts.set(name, count);
+    return `${name}#${count}`;
+  };
   const step = {
-    async do(name: string, options: any, fn?: () => Promise<unknown>) {
-      if (typeof options === 'function') [fn, options] = [options, {}];
-      if (names.has(name)) throw new Error(`Step name used twice: ${name}`);
-      names.add(name);
-      const limit = options.retries?.limit ?? DEFAULT_RETRIES;
+    async do(name: string, stepOptions: any, fn?: () => Promise<unknown>) {
+      if (typeof stepOptions === 'function') [fn, stepOptions] = [stepOptions, {}];
+      const key = keyOf(name);
+      const recorded = cache.get(key);
+      if (recorded) {
+        if ('error' in recorded) throw new Error(recorded.error);
+        return recorded.result;
+      }
+      const limit = stepOptions.retries?.limit ?? DEFAULT_RETRIES;
       for (let attempt = 0; ; attempt++) {
         log.push(name);
         try {
-          const result = await fn!();
-          return result === undefined ? undefined : JSON.parse(JSON.stringify(result));
+          const value = await fn!();
+          const result = value === undefined ? undefined : JSON.parse(JSON.stringify(value));
+          cache.set(key, { result });
+          afterStep(name);
+          return result;
         } catch (error) {
-          if (attempt >= limit) throw new Error(error instanceof Error ? error.message : String(error));
+          if (attempt >= limit) {
+            const message = error instanceof Error ? error.message : String(error);
+            cache.set(key, { error: message });
+            throw new Error(message);
+          }
         }
       }
     },
     async sleep(name: string, duration: string) {
-      if (names.has(name)) throw new Error(`Step name used twice: ${name}`);
-      names.add(name);
+      const key = keyOf(name);
+      if (cache.has(key)) return;
       log.push(`sleep ${name} (${duration})`);
+      cache.set(key, { result: null });
       onSleep(name);
+      if (name === evictAt) throw new Evicted(name);
     },
     async sleepUntil() {
       throw new Error('not used');
     },
   };
-  return { step: step as any, log };
+  return { step: step as any, log, cache };
 }
 
 const run = (req: unknown, step: unknown) => new CardChargeFinish().run(req as any, step as any);
@@ -87,6 +123,7 @@ afterEach(() => {
 /** Silences and returns the console.error spy */
 const quietLog = () => vi.spyOn(console, 'error').mockImplementation(() => undefined);
 
+const ON_ORDER = 'GET /orders/order_9/payments';
 const RECURRING = 'POST /payments/create/recurring';
 const CAPTURE = 'POST /payments/pay_saved/capture';
 const READ = 'GET /payments/pay_saved';
@@ -106,12 +143,12 @@ describe('card-charge-finish workflow', () => {
     const { step, log } = fakeStep();
     await run(req, step);
     expect(log).toEqual(['check pending', 'charge saved card', 'capture', 'record']);
-    expect(summary(calls)).toEqual([RECURRING, CAPTURE]);
-    expect(calls[0].body).toEqual({
+    expect(summary(calls)).toEqual([ON_ORDER, RECURRING, CAPTURE]);
+    expect(calls.find((call) => call.url.endsWith('/create/recurring'))?.body).toEqual({
       email: 'ada@example.com', contact: '+911234567890', amount: 1050, currency: 'INR',
       order_id: 'order_9', customer_id: 'cust_1', token: 'token_1', recurring: '1', notes: { swell_payment_id: 'swell_pay_1' },
     });
-    expect(calls[1].body).toEqual({ amount: 1050, currency: 'INR' });
+    expect(calls.find((call) => call.url.endsWith('/capture'))?.body).toEqual({ amount: 1050, currency: 'INR' });
     expect(payment('pay_saved')).toMatchObject({ status: 'captured' });
     expect(writesOf(req)).toEqual(finished());
   });
@@ -130,7 +167,7 @@ describe('card-charge-finish workflow', () => {
       const { step, log } = fakeStep();
       await run(req, step);
       expect(log).toEqual(['check pending', 'charge saved card', 'capture', 'record', 'late capture']);
-      expect(summary(calls)).toEqual([RECURRING]);
+      expect(summary(calls)).toEqual([ON_ORDER, RECURRING]);
       expect(payment('pay_saved')).toMatchObject({ status: 'authorized' });
       expect(writesOf(req)).toEqual(finished(false));
     });
@@ -145,7 +182,7 @@ describe('card-charge-finish workflow', () => {
         return result;
       });
       await run(req, fakeStep().step);
-      expect(summary(calls)).toEqual([RECURRING, CAPTURE]);
+      expect(summary(calls)).toEqual([ON_ORDER, RECURRING, CAPTURE]);
       expect(payment('pay_saved')).toMatchObject({ status: 'captured' });
       expect(writesOf(req)).toEqual([...finished(false), ['/payments/swell_pay_1', { captured: true }]]);
     });
@@ -157,7 +194,7 @@ describe('card-charge-finish workflow', () => {
     const { step, log } = fakeStep();
     await run(req, step);
     expect(log).toEqual(['check pending', 'charge saved card', 'read payment', 'capture', 'record']);
-    expect(summary(calls)).toEqual([RECURRING, READ, CAPTURE]);
+    expect(summary(calls)).toEqual([ON_ORDER, RECURRING, READ, CAPTURE]);
     expect(writesOf(req)).toEqual(finished());
   });
 
@@ -200,7 +237,7 @@ describe('card-charge-finish workflow', () => {
     const { step, log } = fakeStep();
     await run(req, step);
     expect(log).toEqual(['check pending', 'charge saved card', 'read payment', 'record']);
-    expect(summary(calls)).toEqual([RECURRING, READ]);
+    expect(summary(calls)).toEqual([ON_ORDER, RECURRING, READ]);
     expect(writesOf(req)).toEqual(failed('Saved card payment pay_saved was not finalized: Payment is not authorized (status: failed)'));
   });
 
@@ -211,7 +248,7 @@ describe('card-charge-finish workflow', () => {
     const { step, log } = fakeStep();
     await run(req, step);
     expect(log).toEqual(['check pending', 'charge saved card', 'record']);
-    expect(summary(calls)).toEqual([RECURRING]);
+    expect(summary(calls)).toEqual([ON_ORDER, RECURRING, ON_ORDER]);
     expect(writesOf(req)).toEqual(failed('Razorpay: The token is invalid'));
   });
 
@@ -222,7 +259,7 @@ describe('card-charge-finish workflow', () => {
       const { step, log } = fakeStep();
       await run(req, step);
       expect(log).toEqual(['check pending', 'charge saved card', 'sleep wait for Razorpay (1 minute)', 'find by receipt', 'capture', 'record']);
-      expect(summary(calls)).toEqual([RECURRING, 'GET /orders?receipt=swell_pay_1&count=100', 'GET /orders/order_9/payments', CAPTURE]);
+      expect(summary(calls)).toEqual([ON_ORDER, RECURRING, 'GET /orders?receipt=swell_pay_1&count=100', 'GET /orders/order_9/payments', CAPTURE]);
       expect(writesOf(req)).toEqual(finished());
     });
 
@@ -297,16 +334,12 @@ describe('card-charge-finish workflow', () => {
 
   it('does not write over a Swell payment the sweep finished meanwhile', async () => {
     fakeRazorpay([], { orders: [order] });
+    const log = quietLog();
     const { req, stored } = request();
-    const { step, log } = fakeStep();
-    const create = step.do;
-    step.do = async (name: string, ...rest: any[]) => {
-      const result = await create(name, ...rest);
-      if (name === 'capture') Object.assign(stored, { success: true, transaction_id: 'pay_saved' });
-      return result;
-    };
-    await run(req, step);
-    expect(log).toEqual(['check pending', 'charge saved card', 'capture', 'record']);
+    const engine = fakeStep({ afterStep: (name) => name === 'capture' && Object.assign(stored, { success: true, transaction_id: 'pay_saved' }) });
+    await run(req, engine.step);
+    expect(engine.log).toEqual(['check pending', 'charge saved card', 'capture', 'record']);
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('already has a result'), expect.stringMatching(/swell_pay_1.*pay_saved/));
     expect(writesOf(req)).toEqual([]);
   });
 
@@ -323,7 +356,119 @@ describe('card-charge-finish workflow', () => {
     const { calls } = fakeRazorpay([], { orders: [order], captures: { pay_saved: 'lost' } });
     const { req } = request();
     await run(req, fakeStep().step);
-    expect(summary(calls)).toEqual([RECURRING, CAPTURE, READ]);
+    expect(summary(calls)).toEqual([ON_ORDER, RECURRING, CAPTURE, READ]);
+    expect(writesOf(req)).toEqual(finished());
+  });
+
+  describe('at most one payment per order (a step may run again after an engine restart)', () => {
+    const existing = { id: 'pay_saved', status: 'authorized', amount: 1050, currency: 'INR', method: 'card', order_id: 'order_9' };
+
+    it('reuses a payment already on the order instead of creating another', async () => {
+      const { calls } = fakeRazorpay([existing], { orders: [order] });
+      const { req } = request();
+      const { step, log } = fakeStep();
+      await run(req, step);
+      expect(log).toEqual(['check pending', 'charge saved card', 'capture', 'record']);
+      expect(summary(calls)).toEqual([ON_ORDER, CAPTURE]);
+      expect(writesOf(req)).toEqual(finished());
+    });
+
+    it('waits for the debit of a payment already on the order that is still created', async () => {
+      const razorpay = fakeRazorpay([{ ...existing, status: 'created' }], { orders: [order] });
+      const { req } = request();
+      const { step, log } = fakeStep((name) => razorpay.update('pay_saved', { status: 'authorized' }) && name);
+      await run(req, step);
+      expect(log.slice(0, 4)).toEqual(['check pending', 'charge saved card', 'sleep wait for debit 1 (6 hours)', 'read payment']);
+      expect(summary(razorpay.calls)).not.toContain(RECURRING);
+      expect(writesOf(req)).toEqual(finished());
+    });
+
+    it('does not take a 4xx for a refusal when the order has a payment that holds the money', async () => {
+      const razorpay = fakeRazorpay([], { orders: [order], refuseRecurring: true });
+      const fetch = globalThis.fetch;
+      // The first attempt's payment shows up on the order while the repeated create/recurring is refused
+      vi.stubGlobal('fetch', async (url: string, init: RequestInit) => {
+        if (url.endsWith('/payments/create/recurring')) razorpay.update('pay_saved', existing);
+        return fetch(url, init);
+      });
+      const { req } = request();
+      await run(req, fakeStep().step);
+      expect(summary(razorpay.calls)).toEqual([ON_ORDER, RECURRING, ON_ORDER, CAPTURE]);
+      expect(writesOf(req)).toEqual(finished());
+    });
+  });
+
+  describe('a Swell payment failed or voided while the run waited', () => {
+    it.each([
+      ['failed', { success: false }],
+      ['voided', { void: true }],
+    ])('does not capture a payment whose Swell payment was %s, and logs it', async (_name, change) => {
+      const log = quietLog();
+      const { calls } = fakeRazorpay([], { orders: [order] });
+      const { req, stored } = request();
+      const { step, log: steps } = fakeStep({ afterStep: (name) => name === 'charge saved card' && Object.assign(stored, change) });
+      await run(req, step);
+      expect(steps).toEqual(['check pending', 'charge saved card', 'capture']);
+      expect(summary(calls)).toEqual([ON_ORDER, RECURRING]);
+      expect(writesOf(req)).toEqual([]);
+      expect(log).toHaveBeenCalledWith(expect.any(String), expect.stringMatching(/swell_pay_1.*pay_saved/));
+    });
+
+    it('charges nothing for a voided Swell payment, without reading the keys', async () => {
+      const { calls } = fakeRazorpay([], { orders: [order] });
+      const { req } = request({ captured: true, void: true });
+      const { step, log } = fakeStep();
+      await run(req, step);
+      expect(log).toEqual(['check pending']);
+      expect(calls).toEqual([]);
+      expect(req.swell.get).not.toHaveBeenCalledWith('/settings/razorpay/card');
+    });
+  });
+
+  describe('a capture asked for after the capture step', () => {
+    it('captures in the record step before writing the success', async () => {
+      const { calls } = fakeRazorpay([], { orders: [order] });
+      const { req, stored } = request({ captured: false });
+      const { step, log } = fakeStep({ afterStep: (name) => name === 'capture' && (stored.captured = true) });
+      await run(req, step);
+      expect(log).toEqual(['check pending', 'charge saved card', 'capture', 'record']);
+      expect(summary(calls)).toEqual([ON_ORDER, RECURRING, CAPTURE]);
+      expect(writesOf(req)).toEqual(finished());
+    });
+
+    it('retries a late capture 6 times, then logs it once and ends the run', async () => {
+      const log = quietLog();
+      fakeRazorpay([], { orders: [order], captures: { pay_saved: 'error' } });
+      const { req, stored } = request({ captured: false });
+      const { step, log: steps } = fakeStep({ afterStep: (name) => name === 'record' && (stored.captured = true) });
+      await expect(run(req, step)).resolves.toBe(true);
+      expect(steps.filter((name) => name === 'late capture')).toHaveLength(7);
+      expect(writesOf(req)).toEqual(finished(false));
+      expect(log).toHaveBeenCalledOnce();
+      expect(log).toHaveBeenCalledWith(expect.stringContaining('late capture'), expect.stringMatching(/swell_pay_1.*pay_saved/));
+    });
+  });
+
+  it('never keeps the Razorpay keys in a step result', async () => {
+    fakeRazorpay([], { orders: [order], recurringSignature: false });
+    const { req } = request({ captured: false });
+    const { step, cache } = fakeStep();
+    await run(req, step);
+    const recorded = JSON.stringify([...cache.entries()]);
+    expect(recorded).not.toContain(settings.key_secret);
+    expect(recorded).not.toContain(settings.key_id);
+  });
+
+  it('creates the payment once when the engine replays the run after a sleep', async () => {
+    const razorpay = fakeRazorpay([], { orders: [order], recurringStatus: 'created' });
+    const { req } = request();
+    const first = fakeStep({ evictAt: 'wait for debit 1' });
+    await expect(run(req, first.step)).rejects.toThrow(Evicted);
+    razorpay.update('pay_saved', { status: 'authorized' });
+    const replay = fakeStep({ cache: first.cache });
+    await run(req, replay.step);
+    expect(replay.log).toEqual(['read payment 2', 'capture', 'record']);
+    expect(summary(razorpay.calls).filter((call) => call === RECURRING)).toHaveLength(1);
     expect(writesOf(req)).toEqual(finished());
   });
 });

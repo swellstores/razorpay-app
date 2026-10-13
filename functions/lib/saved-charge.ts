@@ -149,14 +149,17 @@ export interface PaymentsApi {
 }
 
 /** The Swell payment as stored now */
-export type SwellPayment = { id: string; captured?: boolean; success?: boolean | null };
+export type SwellPayment = { id: string; captured?: boolean; success?: boolean | null; void?: boolean };
+
+/** The Swell payment a charge is for; the Swell side of a finish needs no Razorpay client */
+export type SwellTarget = Pick<Charge, 'swellPaymentId'>;
 
 /** Logs naming the Swell payment and, when there is one, the Razorpay payment */
-export function logError(message: string, charge: Charge, paymentId?: string) {
+export function logError(message: string, charge: SwellTarget, paymentId?: string) {
   console.error(message, `(Swell payment ${charge.swellPaymentId}${paymentId ? `, Razorpay payment ${paymentId}` : ''})`);
 }
 
-export async function readSwellPayment(swell: PaymentsApi, charge: Charge): Promise<SwellPayment> {
+export async function readSwellPayment(swell: PaymentsApi, charge: SwellTarget): Promise<SwellPayment> {
   const record = (await swell.get(`/payments/${charge.swellPaymentId}`)) as Partial<SwellPayment> | null;
   if (!record?.id) {
     throw new Error('The Swell payment could not be read');
@@ -169,7 +172,7 @@ export async function readSwellPayment(swell: PaymentsApi, charge: Charge): Prom
  * capture of an authorize-phase payment can come while its charge is in flight, and the hook then leaves
  * it to the finish.
  */
-export async function wantsCapture(swell: PaymentsApi, charge: Charge): Promise<boolean> {
+export async function wantsCapture(swell: PaymentsApi, charge: SwellTarget): Promise<boolean> {
   return (await readSwellPayment(swell, charge)).captured !== false;
 }
 
@@ -177,7 +180,7 @@ export async function wantsCapture(swell: PaymentsApi, charge: Charge): Promise<
  * Writes the Swell payment. A write refused by validation answers `{ errors }` rather than throwing, and
  * one that answers without the payment wrote nothing: both throw.
  */
-export async function writePayment(swell: PaymentsApi, charge: Charge, data: Record<string, unknown>): Promise<void> {
+export async function writePayment(swell: PaymentsApi, charge: SwellTarget, data: Record<string, unknown>): Promise<void> {
   const result = (await swell.put(`/payments/${charge.swellPaymentId}`, data)) as { id?: string; errors?: unknown } | null;
   if (result?.errors) {
     throw new Error(`Could not record the saved card charge: ${JSON.stringify(result.errors)}`);
@@ -192,7 +195,12 @@ export async function writePayment(swell: PaymentsApi, charge: Charge, data: Rec
  * on a payment whose record is `captured: false` it would fire the charge again. Throws when the write
  * fails.
  */
-export async function recordOutcome(swell: PaymentsApi, charge: Charge, outcome: Outcome, paymentId?: string): Promise<void> {
+export async function recordOutcome(
+  swell: PaymentsApi,
+  charge: SwellTarget & Pick<Charge, 'capture'>,
+  outcome: Outcome,
+  paymentId?: string,
+): Promise<void> {
   if ('reason' in outcome) {
     logError(`Saved card charge failed: ${outcome.reason}`, charge, paymentId);
     return writePayment(swell, charge, { success: false, error: { message: outcome.reason } });
