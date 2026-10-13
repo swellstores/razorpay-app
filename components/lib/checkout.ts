@@ -93,6 +93,12 @@ export function openRazorpay(
   });
 }
 
+/** A card expiry month or year as a positive whole number, or undefined */
+function expiryOf(value: string | number | undefined): number | undefined {
+  const number = Number(value);
+  return Number.isInteger(number) && number > 0 ? number : undefined;
+}
+
 /** Billing the checkout saves for the verified payment: the saved card token and the payment to finalize */
 export function toBilling(payment: VerifiedPayment) {
   if (payment.status !== 'authorized' && payment.status !== 'captured') {
@@ -101,14 +107,17 @@ export function toBilling(payment: VerifiedPayment) {
   const { token } = payment;
   if (!token?.id) throw new Error('The card could not be saved');
   const { card } = token;
+  const expMonth = expiryOf(card?.expiry_month);
+  const expYear = expiryOf(card?.expiry_year);
   return {
     billing: {
       card: {
         token: token.id,
         last4: card?.last4,
         brand: card?.network,
-        exp_month: Number(card?.expiry_month),
-        exp_year: Number(card?.expiry_year),
+        // Left out rather than saved as NaN or 0 when Razorpay has no valid expiry
+        ...(expMonth && { exp_month: expMonth }),
+        ...(expYear && { exp_year: expYear }),
       },
       intent: { razorpay: { id: payment.id } },
     },

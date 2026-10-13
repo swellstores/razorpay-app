@@ -113,6 +113,18 @@ describe('toBilling', () => {
     });
   });
 
+  it.each([
+    ['missing', {}],
+    ['not a number', { expiry_month: 'xx', expiry_year: 'abcd' }],
+    ['zero or empty', { expiry_month: '0', expiry_year: '' }],
+    ['not a whole number', { expiry_month: '1.5', expiry_year: -2030 }],
+  ])('leaves out an expiry that is %s', (_name, expiry) => {
+    const { billing } = toBilling({ id: 'pay_1', status: 'authorized', token: { id: 'token_1', card: { last4: '1111', network: 'Visa', ...expiry } } });
+    expect(billing.card).not.toHaveProperty('exp_month');
+    expect(billing.card).not.toHaveProperty('exp_year');
+    expect(billing.card).toMatchObject({ token: 'token_1', last4: '1111', brand: 'Visa' });
+  });
+
   it('refuses a payment that is not authorized', () => {
     expect(() => toBilling({ id: 'pay_1', status: 'failed', token })).toThrow('Payment was not authorized');
   });
