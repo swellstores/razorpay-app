@@ -1,7 +1,7 @@
 import { toSubunits } from '../lib/amount';
 import type Razorpay from './lib/razorpay';
 import type { RazorpayPayment } from './lib/razorpay';
-import { contactOf } from './lib/customer';
+import { customerOf } from './lib/customer';
 import { getRazorpay } from './lib/settings';
 
 export const config: SwellConfig = {
@@ -108,26 +108,6 @@ async function chargeShopperPayment(paymentId: string, charge: Charge): Promise<
   return charge.capture ? captureAndClaim(payment, charge) : { transactionId: payment.id };
 }
 
-/** The Razorpay customer the card was saved for, from the Swell account */
-async function customerOf(req: SwellRequest, razorpay: Razorpay) {
-  const accountId = req.data.account_id;
-  if (!accountId) {
-    throw new Error('No account for this charge');
-  }
-  const account = (await req.swell.get(`/accounts/${accountId}`)) ?? {};
-  const email = typeof account.email === 'string' ? account.email.trim() : '';
-  if (!email) {
-    throw new Error('An email address is required to charge the saved card');
-  }
-  const contact = contactOf(account);
-  if (!contact) {
-    throw new Error('A phone number is required to charge the saved card');
-  }
-  // Returns the existing customer when the same details were saved before
-  const customer = await razorpay.createCustomer({ name: account.name, email, contact, fail_existing: '0' });
-  return { id: customer.id, email, contact };
-}
-
 /**
  * Brings a new saved card payment to the phase's status. Razorpay answers `authorized` right after
  * create/recurring, so the capture is explicit; it may also have captured it already. It was bound at
@@ -151,7 +131,12 @@ async function finalizeSavedPayment(paymentId: string, charge: Charge): Promise<
 /** Charges the saved card token with a new payment, bound to this Swell payment at creation */
 async function chargeSavedCard(req: SwellRequest, token: string, charge: Charge): Promise<string> {
   const { razorpay, amount, currency } = charge;
-  const customer = await customerOf(req, razorpay);
+  const accountId = req.data.account_id;
+  if (!accountId) {
+    throw new Error('No account for this charge');
+  }
+  // The Razorpay customer the card was saved for
+  const customer = await customerOf(req, razorpay, accountId, 'charge the saved card');
   const notes = { swell_payment_id: charge.swellPaymentId };
   const order = await razorpay.createOrder({ amount, currency, payment_capture: false, notes });
   const { razorpay_payment_id: paymentId } = await razorpay.createRecurringPayment({

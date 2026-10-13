@@ -1,4 +1,4 @@
-import { contactOf } from './lib/customer';
+import { customerOf } from './lib/customer';
 import { getRazorpay } from './lib/settings';
 
 export const config: SwellConfig = {
@@ -9,7 +9,7 @@ export const config: SwellConfig = {
 
 export default async function (req: SwellRequest) {
   const { amount, currency } = req.data.intent ?? {};
-  const account = req.data.account ?? {};
+  const accountId = req.data.account?.id || req.data.account_id;
 
   try {
     if (!Number.isInteger(amount) || amount <= 0) {
@@ -18,23 +18,13 @@ export default async function (req: SwellRequest) {
     if (typeof currency !== 'string' || !currency.trim()) {
       throw new Error('Invalid currency');
     }
-
-    const email = typeof account.email === 'string' ? account.email.trim() : '';
-    if (!email) {
-      throw new Error('An email address is required to save the card');
-    }
-    const contact = contactOf(account);
-    if (!contact) {
-      throw new Error('A phone number is required to save the card');
+    if (!accountId) {
+      throw new Error('No account for this checkout');
     }
 
     const razorpay = await getRazorpay(req);
-    const customer = await razorpay.createCustomer({
-      name: account.name,
-      email,
-      contact,
-      fail_existing: '0', // Returns the existing customer when the same details were saved before
-    });
+    // The account as stored, as the charge loads it: the request's copy may lack the phone
+    const customer = await customerOf(req, razorpay, accountId, 'save the card');
     // Built from the amount and currency only: the rest of the intent comes from the browser
     const order = await razorpay.createOrder({
       amount,
