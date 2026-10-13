@@ -10,7 +10,7 @@ const account = { id: 'acc_1', name: 'Ada Lovelace', email: 'ada@example.com', p
 /** The request's account is only its id: the shopper's details come from the loaded `/accounts/acc_1` */
 function request(data: Record<string, unknown>, shopper: Record<string, unknown> | undefined = account) {
   const get = vi.fn(async (url: string) => (url === '/accounts/acc_1' ? shopper : null));
-  return { appId: 'razorpay', data: { account: { id: 'acc_1' }, ...data }, swell: { settings: vi.fn(async () => settings), get } } as any;
+  return { appId: 'razorpay', data: { account: { id: 'acc_1' }, ...data }, appValues: (values: object) => ({ $app: { razorpay: values } }), swell: { settings: vi.fn(async () => settings), get, put: vi.fn(async () => ({})) } } as any;
 }
 
 afterEach(() => vi.unstubAllGlobals());
@@ -114,6 +114,37 @@ describe('payment.create_intent', () => {
       });
     }
     expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('takes the phone typed into the checkout when the account has none, and keeps the customer on the account', async () => {
+    const calls = stubRazorpay();
+    const req = request({ intent: { amount: 1050, currency: 'INR', contact: ' +919999999999 ' } }, { name: 'A', email: 'a@b.c' });
+    expect(await createIntent(req)).toMatchObject({ result: { customer: { id: 'cust_1' } } });
+    expect(calls[0].body).toEqual({ name: 'A', email: 'a@b.c', contact: '+919999999999', fail_existing: '0' });
+    expect(req.swell.put).toHaveBeenCalledWith('/accounts/acc_1', { $app: { razorpay: { customer_id: 'cust_1', contact: '+919999999999' } } });
+  });
+
+  it("prefers the account's phone to the checkout's", async () => {
+    const calls = stubRazorpay();
+    await createIntent(request({ intent: { amount: 1050, currency: 'INR', contact: '+919999999999' } }));
+    expect(calls[0].body.contact).toBe('+911234567890');
+  });
+
+  it('uses the customer kept on the account, without creating one', async () => {
+    const calls = stubRazorpay();
+    const shopper = { ...account, phone: '+910000000009', $app: { razorpay: { customer_id: 'cust_kept', contact: '+911234567890' } } };
+    const req = request({ intent: { amount: 1050, currency: 'INR' } }, shopper);
+    expect(await createIntent(req)).toMatchObject({ result: { customer: { id: 'cust_kept' } } });
+    expect(calls.map((call) => call.url)).toEqual(['https://api.razorpay.com/v1/orders']);
+    expect(calls[0].body.customer_id).toBe('cust_kept');
+    expect(req.swell.put).not.toHaveBeenCalled();
+  });
+
+  it('fails when the customer can not be kept on the account', async () => {
+    stubRazorpay();
+    const req = request({ intent: { amount: 1050, currency: 'INR' } });
+    req.swell.put.mockRejectedValueOnce(new Error('Permission denied'));
+    expect(await createIntent(req)).toEqual({ error: 'Permission denied' });
   });
 
   it('rejects an intent without a positive whole amount', async () => {

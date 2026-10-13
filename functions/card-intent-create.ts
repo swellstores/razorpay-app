@@ -8,7 +8,7 @@ export const config: SwellConfig = {
 };
 
 export default async function (req: SwellRequest) {
-  const { amount, currency } = req.data.intent ?? {};
+  const { amount, currency, contact } = req.data.intent ?? {};
   const accountId = req.data.account?.id || req.data.account_id;
 
   try {
@@ -23,8 +23,8 @@ export default async function (req: SwellRequest) {
     }
 
     const razorpay = await getRazorpay(req);
-    // The account as stored, as the charge loads it: the request's copy may lack the phone
-    const customer = await customerOf(req, razorpay, accountId, 'save the card');
+    // The account as stored, as the charge loads it; the checkout's phone only when the account has none
+    const customer = await customerOf(req, razorpay, accountId, 'save the card', contact);
     // Built from the amount and currency only: the rest of the intent comes from the browser
     const order = await razorpay.createOrder({
       amount,

@@ -16,6 +16,12 @@ interface CheckoutCart {
   currency: string;
   account?: { email?: string; name?: string; phone?: string };
   billing?: { phone?: string };
+  shipping?: { phone?: string };
+}
+
+/** The phone the shopper gave: an account often has none before its first order */
+function contactOf(cart: CheckoutCart): string | undefined {
+  return [cart.account?.phone, cart.billing?.phone, cart.shipping?.phone].map((phone) => phone?.trim()).find(Boolean);
 }
 
 export default function Razorpay({ context, settings, on, call }: ComponentProps<never, PaymentContext<CheckoutCart>>) {
@@ -31,15 +37,17 @@ export default function Razorpay({ context, settings, on, call }: ComponentProps
       // Load the modal first, so a failed load leaves no Razorpay order behind
       const RazorpayCheckout = await loadRazorpay();
       const { cart } = latest.current;
+      const contact = contactOf(cart);
       const { order, customer } = await call<RazorpayIntent>('createIntent', {
         amount: toSubunits(cart.capture_total, cart.currency),
         currency: cart.currency,
+        contact,
       });
       const response = await openRazorpay(RazorpayCheckout, {
         keyId,
         order,
         customerId: customer.id,
-        prefill: { email: cart.account?.email, name: cart.account?.name, contact: cart.account?.phone || cart.billing?.phone },
+        prefill: { email: cart.account?.email, name: cart.account?.name, contact },
       });
       const payment = await call<VerifiedPayment>('getIntent', response satisfies RazorpayResponse);
       return toBilling(payment);

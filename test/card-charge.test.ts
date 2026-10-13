@@ -8,7 +8,7 @@ const account = { name: 'Ada Lovelace', email: 'ada@example.com', phone: '+91123
 
 function request(data: Record<string, unknown>, shopper: Record<string, unknown> | undefined = account) {
   const get = vi.fn(async (url: string) => (url === '/accounts/acc_1' ? shopper : null));
-  return { appId: 'razorpay', data, swell: { settings: vi.fn(async () => settings), get } } as any;
+  return { appId: 'razorpay', data, appValues: (values: object) => ({ $app: { razorpay: values } }), swell: { settings: vi.fn(async () => settings), get, put: vi.fn(async () => ({})) } } as any;
 }
 
 type Call = { method: string; url: string; body?: any };
@@ -528,6 +528,25 @@ describe('payment.charge', () => {
       expect(await charge(request(renewal, shopper))).toEqual(success('pay_saved'));
       expect(calls.find((call) => call.url.endsWith('/customers'))?.body.contact).toBe(contact);
       expect(calls.find((call) => call.url.endsWith('/payments/create/recurring'))?.body.contact).toBe(contact);
+    });
+
+    it('charges for the customer kept on the account, without creating one', async () => {
+      const { calls } = fakeRazorpay([]);
+      const shopper = { ...account, phone: '+910000000009', $app: { razorpay: { customer_id: 'cust_kept', contact: '+919999999999' } } };
+      const req = request(renewal, shopper);
+      expect(await charge(req)).toEqual(success('pay_saved'));
+      expect(summary(calls)).not.toContain('POST /customers');
+      expect(calls.find((call) => call.url.endsWith('/payments/create/recurring'))?.body).toMatchObject({
+        customer_id: 'cust_kept', contact: '+919999999999', email: 'ada@example.com',
+      });
+      expect(req.swell.put).not.toHaveBeenCalled();
+    });
+
+    it('keeps the customer it found on the account', async () => {
+      fakeRazorpay([]);
+      const req = request(renewal);
+      expect(await charge(req)).toEqual(success('pay_saved'));
+      expect(req.swell.put).toHaveBeenCalledWith('/accounts/acc_1', { $app: { razorpay: { customer_id: 'cust_1', contact: '+911234567890' } } });
     });
 
     it('fails without a phone number, before calling Razorpay', async () => {
