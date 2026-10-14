@@ -74,13 +74,12 @@ The shopper needs an email address and a phone number: Razorpay requires both to
 
 ---
 
-## Limits and known issues
+## Limits
 
 - Cards only: Razorpay's other methods (UPI, netbanking, wallets) are not offered.
 - A single charge on a saved card is limited to 10,000 in the order's currency.
 - Razorpay decides which cards and currencies support recurring payments.
 - In live mode, a charge on a saved Indian card is debited only after Razorpay notifies the cardholder, about 36 hours later. The payment stays **Pending** until then (the app checks every 6 hours, for up to 8 days).
-- On a Razorpay US account, the Razorpay window hangs on "Processing Payment" when the shopper picks a card saved earlier (Razorpay's saved-card consent request fails). Entering the card again works.
 
 ---
 
@@ -98,5 +97,4 @@ swell logs --type workflow --app=.       # card-charge-finish steps
 ```
 
 - Workflows run only after `swell app push`, not under `swell app dev`, so a saved card charge stays **Pending** there.
-- Don't push while saved card charges are running: a workflow started during the deploy may never start. Its payment is failed by the sweep 30 minutes later, with nothing charged.
 - `swell app push` exits successfully even when a file fails; read its output.
