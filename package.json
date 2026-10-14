@@ -1,5 +1,5 @@
 {
-  "description": "",
+  "description": "Razorpay card payments for Swell",
   "devDependencies": {
     "@swell/app-types": "^1.2.0",
     "typescript": "^5.9.3",
@@ -13,9 +13,6 @@
     "test": "vitest run"
   },
   "version": "1.0.0",
-  "workspaces": [
-    "frontend"
-  ],
   "dependencies": {
     "preact": "^10.28.0"
   }
