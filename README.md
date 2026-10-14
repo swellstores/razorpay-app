@@ -96,6 +96,8 @@ For each order, the logs should show `payment.charge` calls whose `transaction_i
 ## Limits
 
 - Cards only.
+- On a Razorpay US account (`rzp_test_us_…` keys, `api-us.razorpay.com`) the checkout modal hangs on "Processing Payment" when the shopper picks a card Razorpay saved before: the modal's saved-card consent request answers 400 ("The requested URL was not found"). Entering the card again works. Saved cards still charge from the server (renewals, admin charges).
+- Do not push the app while saved card charges run: a workflow started during the deploy may never start; the sweep fails its Swell payment after 30 minutes, with nothing charged.
 - Subscriptions are supported (`subscriptions: true` on the card extension): renewals charge the saved card token without a checkout. A card saved without recurring support cannot be charged later.
 - Razorpay recurring card payments are INR-only per Razorpay, so the card can be saved and charged in INR only. Amounts are sent in the currency's smallest unit (`lib/amount.ts`).
 - The saved token is capped at ₹10,000 per charge (`max_amount: 1000000`).
