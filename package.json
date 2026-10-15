@@ -3,7 +3,7 @@
   "devDependencies": {
     "@swell/app-types": "^1.2.0",
     "typescript": "^5.9.3",
-    "vitest": "3.2.7",
+    "vitest": "4.1.11",
     "@swell/apps-sdk": "^2.0.0-alpha.7"
   },
   "name": "razorpay",
