@@ -1,50 +1,50 @@
 {
-  "description": "Card payments with Razorpay, with saved cards and subscriptions",
-  "id": "razorpay",
-  "name": "Razorpay",
-  "type": "integration",
-  "support_email": "support@swell.is",
-  "documentation_url": "https://developers.swell.is/app-guides/razorpay",
-  "repository_url": "https://github.com/swellstores/razorpay-app",
-  "price_external": true,
-  "version": "1.0.0",
-  "permissions": [
-    "write_accounts",
-    "write_payments",
-    "read_settings"
-  ],
-  "images": [
-    {
-      "id": "checkout",
-      "image_src": "assets/images/1-checkout.png",
-      "title": "Pay without leaving the checkout",
-      "description": "Shoppers pay in Razorpay's secure window, and their card is saved for renewals and later charges."
-    },
-    {
-      "id": "capture",
-      "image_src": "assets/images/2-capture.png",
-      "title": "Take the money when you choose",
-      "description": "Capture on order or within 5 days, charge the saved card, and refund from the order. A payment is never taken twice."
-    },
-    {
-      "id": "subscriptions",
-      "image_src": "assets/images/3-subscriptions.png",
-      "title": "Subscriptions renew on the saved card",
-      "description": "Renewals are charged on Razorpay automatically, with no checkout for the customer."
-    },
-    {
-      "id": "setup",
-      "image_src": "assets/images/4-setup.png",
-      "title": "Set up in minutes",
-      "description": "Choose Razorpay as the payment gateway for credit cards, paste your API keys and save."
-    }
-  ],
-  "extensions": [
-    {
-      "id": "card",
-      "type": "payment",
-      "method": "card",
-      "subscriptions": true
-    }
-  ]
+	"description": "Card payments with Razorpay, with saved cards and subscriptions",
+	"id": "razorpay",
+	"name": "Razorpay",
+	"type": "integration",
+	"support_email": "support@swell.is",
+	"documentation_url": "https://developers.swell.is/app-guides/razorpay",
+	"repository_url": "https://github.com/swellstores/razorpay-app",
+	"price_external": true,
+	"version": "1.0.1",
+	"permissions": [
+		"write_accounts",
+		"write_payments",
+		"read_settings"
+	],
+	"images": [
+		{
+			"id": "checkout",
+			"image_src": "assets/images/1-checkout.png",
+			"title": "Pay without leaving the checkout",
+			"description": "Shoppers pay in Razorpay's secure window, and their card is saved for renewals and later charges."
+		},
+		{
+			"id": "capture",
+			"image_src": "assets/images/2-capture.png",
+			"title": "Take the money when you choose",
+			"description": "Capture on order or within 5 days, charge the saved card, and refund from the order. A payment is never taken twice."
+		},
+		{
+			"id": "subscriptions",
+			"image_src": "assets/images/3-subscriptions.png",
+			"title": "Subscriptions renew on the saved card",
+			"description": "Renewals are charged on Razorpay automatically, with no checkout for the customer."
+		},
+		{
+			"id": "setup",
+			"image_src": "assets/images/4-setup.png",
+			"title": "Set up in minutes",
+			"description": "Choose Razorpay as the payment gateway for credit cards, paste your API keys and save."
+		}
+	],
+	"extensions": [
+		{
+			"id": "card",
+			"type": "payment",
+			"method": "card",
+			"subscriptions": true
+		}
+	]
 }
