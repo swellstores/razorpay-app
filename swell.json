@@ -4,13 +4,15 @@
   "name": "Razorpay",
   "type": "integration",
   "support_email": "support@swell.is",
+  "documentation_url": "https://developers.swell.is/app-guides/razorpay",
+  "repository_url": "https://github.com/swellstores/razorpay-app",
+  "price_external": true,
   "version": "1.0.0",
   "permissions": [
     "write_accounts",
     "write_payments",
     "read_settings"
   ],
-  "full_description": "Accept card payments in your Swell checkout with Razorpay. Shoppers pay in Razorpay's secure window, their card is saved for later charges, and every payment is completed from your store, so you decide when the money is taken.\n\n**Card payments in your checkout.** Razorpay becomes the gateway of your store's Card method. Shoppers pay without leaving the checkout and can retry a declined card in the same window. Card details never touch your store: Swell keeps only Razorpay's token for the card, its brand, the last four digits and the expiry date.\n\n**You decide when to take the money.** With automatic capture on, the payment is taken when the order is placed. With it off, the card is only authorized and you capture the payment from the order within 5 days.\n\n**Saved cards and subscriptions.** The card is saved with Razorpay at checkout. Subscriptions renew on it automatically, and Charge order in your dashboard charges it, for example after the authorization has expired.\n\n**Refunds from your dashboard.** Refund a payment, fully or in part, from the order in Swell.\n\n**Safe by design.** Every payment is checked against the order's amount, currency and card method before it is taken, and a payment is never taken twice, even when a request is retried.\n\n**Set up in minutes.** Choose Razorpay as the gateway of the Card method, paste your Razorpay API keys and save. Your Razorpay account needs recurring card payments enabled.\n\nCards only. A single charge on a saved card is limited to 10,000 in the order's currency. In live mode, Razorpay takes a charge on a saved Indian card only after notifying the cardholder, about 36 hours later; until then the payment shows as pending.",
   "images": [
     {
       "id": "checkout",
@@ -34,7 +36,7 @@
       "id": "setup",
       "image_src": "assets/images/4-setup.png",
       "title": "Set up in minutes",
-      "description": "Choose Razorpay as the gateway of the Card method, paste your API keys and save."
+      "description": "Choose Razorpay as the payment gateway for credit cards, paste your API keys and save."
     }
   ],
   "extensions": [
