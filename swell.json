@@ -7,7 +7,7 @@
 	"documentation_url": "https://developers.swell.is/app-guides/razorpay",
 	"repository_url": "https://github.com/swellstores/razorpay-app",
 	"price_external": true,
-	"version": "1.0.1",
+	"version": "1.0.2",
 	"permissions": [
 		"write_accounts",
 		"write_payments",
