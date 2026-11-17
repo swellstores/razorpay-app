@@ -6,7 +6,7 @@
 	"support_email": "support@swell.is",
 	"documentation_url": "https://developers.swell.is/app-guides/razorpay",
 	"repository_url": "https://github.com/swellstores/razorpay-app",
-	"version": "1.0.3",
+	"version": "1.0.4",
 	"permissions": [
 		"write_accounts",
 		"write_payments",
